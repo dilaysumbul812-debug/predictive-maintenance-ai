@@ -1,0 +1,1954 @@
+# ==========================================================
+# PREDICTIVE MAINTENANCE AI v2
+# ENDÜSTRİYEL YAPAY ZEKA PLATFORMU
+# ==========================================================
+import pandas as pd
+import numpy as np
+import requests
+import json
+import joblib
+import shap
+import warnings
+import os
+import smtplib
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
+from email.mime.application import MIMEApplication
+import urllib.parse
+from sqlalchemy import create_engine
+warnings.filterwarnings("ignore") # KMeans uyarılarını gizlemek için
+from sklearn.ensemble import IsolationForest
+from sklearn.cluster import KMeans
+from sklearn.preprocessing import StandardScaler
+from datetime import timedelta
+from xgboost import XGBRegressor
+from xgboost import XGBClassifier
+import re
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.subplots as plt
+import matplotlib.pyplot as plt
+from reportlab.lib.pagesizes import A4
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, Image
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib.enums import TA_JUSTIFY, TA_CENTER
+from reportlab.pdfbase.ttfonts import TTFont
+from reportlab.pdfbase import pdfmetrics
+from reportlab.lib import colors
+
+# ==========================================================
+# MAKİNE ID -> İSİM EŞLEŞTİRME (Anonimleştirilmiş)
+# ==========================================================
+MACHINE_NAME_MAP = {
+    111: "MAKINE-1",
+    112: "MAKINE-2",
+    113: "MAKINE-3",
+    114: "MAKINE-4",
+    115: "MAKINE-5",
+    116: "MAKINE-6",
+    117: "MAKINE-7",
+    118: "MAKINE-8"
+}
+
+def get_machine_name(machine_id):
+    """Verilen makine ID'sini ismine çevirir, bulamazsa ID'yi string olarak döndürür."""
+    try:
+        machine_id_int = int(machine_id)
+        return MACHINE_NAME_MAP.get(machine_id_int, f"Makine {machine_id_int}")
+    except (ValueError, TypeError):
+        return str(machine_id)
+
+# ==========================================================
+# GÜZEL DİZGİLENMİŞ PDF RAPOR ÜRETİCİ
+# ==========================================================
+def create_pdf_report(txt_content, pdf_filename):
+    try:
+        pdfmetrics.registerFont(TTFont('Calibri', 'C:\\Windows\\Fonts\\calibri.ttf'))
+        pdfmetrics.registerFont(TTFont('Calibri-Bold', 'C:\\Windows\\Fonts\\calibrib.ttf'))
+        font_name = 'Calibri'
+        bold_font_name = 'Calibri-Bold'
+    except:
+        font_name = 'Helvetica'
+        bold_font_name = 'Helvetica-Bold'
+        
+    doc = SimpleDocTemplate(pdf_filename, pagesize=A4, rightMargin=40, leftMargin=40, topMargin=40, bottomMargin=40)
+    styles = getSampleStyleSheet()
+    
+    style_normal = ParagraphStyle('NormalStyle', parent=styles['Normal'], fontName=font_name, fontSize=11, leading=16, alignment=TA_JUSTIFY, spaceAfter=8)
+    style_h1 = ParagraphStyle('Heading1Style', parent=styles['Heading1'], fontName=bold_font_name, fontSize=15, textColor=colors.HexColor("#1e3a8a"), spaceAfter=12, spaceBefore=16)
+    style_h2 = ParagraphStyle('Heading2Style', parent=styles['Heading2'], fontName=bold_font_name, fontSize=12, textColor=colors.HexColor("#0f172a"), spaceAfter=6, spaceBefore=10)
+    bullet_style = ParagraphStyle('Bullet', parent=style_normal, leftIndent=15, firstLineIndent=0)
+    
+    story = []
+    lines = txt_content.split('\n')
+    
+    in_summary_box = False
+    summary_content = []
+    in_durus_table = False
+    durus_table_data = []
+    in_bekleme_table = False
+    bekleme_table_data = []
+    in_checklist = False
+    checklist_data = []
+    rhythm_data = []
+    donut_data = {}
+    rapor_klasoru = "Raporlar"
+    
+    if not os.path.exists(rapor_klasoru):
+        os.makedirs(rapor_klasoru)
+        
+    for i, line in enumerate(lines):
+        line = line.strip()
+        
+        # --- V2: TÜM GRAFİK ETİKETLERİNİ YAKALAYAN GENEL HANDLER ---
+        _CHART_SIZES = {
+            "RADAR_CHART": (220, 220),
+            "HEATMAP_CHART": (480, 280),
+            "OPERATOR_RADAR": (480, 350),
+            "PARETO_CHART": (480, 260),
+            "HAFTALIK_RITIM_CHART": (480, 260),
+            "HAFTALIK_ARIZA_CHART": (480, 260),
+            "HAFTALIK_OPERATOR_RADAR": (480, 350),
+        }
+        _chart_found = False
+        for _tag, (_cw, _ch) in _CHART_SIZES.items():
+            if line.startswith(f"[{_tag}"):
+                _chart_found = True
+                try:
+                    chart_path = line.split("|")[1].replace("]", "").strip()
+                    if os.path.exists(chart_path):
+                        img = Image(chart_path, width=_cw, height=_ch)
+                        img.hAlign = 'CENTER'
+                        story.append(Spacer(1, 20))
+                        story.append(img)
+                        story.append(Spacer(1, 20))
+                except Exception as e:
+                    print(f"{_tag} PDF'e eklenemedi: {e}")
+                break
+        if _chart_found:
+            continue
+        
+        # --- TABLO veya CHECKLİST KAPATMA MANTIĞI ---
+        if in_durus_table and not line.startswith("[MAKİNE:"):
+            in_durus_table = False
+            t = Table(durus_table_data, colWidths=[55, 90, 40, 220, 130])
+            t.setStyle(TableStyle([
+                ('BACKGROUND', (0,0), (-1,0), colors.HexColor("#1e3a8a")),
+                ('TEXTCOLOR', (0,0), (-1,0), colors.whitesmoke),
+                ('ALIGN', (0,0), (-1,-1), 'LEFT'),
+                ('FONTNAME', (0,0), (-1,0), bold_font_name),
+                ('BOTTOMPADDING', (0,0), (-1,0), 6),
+                ('TOPPADDING', (0,0), (-1,0), 6),
+                ('BACKGROUND', (0,1), (-1,-1), colors.HexColor("#F8FAFC")), 
+                ('GRID', (0,0), (-1,-1), 1, colors.HexColor("#E2E8F0")),
+                ('VALIGN', (0, 0), (-1, -1), 'TOP')
+            ]))
+            story.append(t)
+            story.append(Spacer(1, 15))
+            durus_table_data = []
+
+        if in_bekleme_table and not line.startswith("[BEKLEME]"):
+            in_bekleme_table = False
+            t = Table(bekleme_table_data, colWidths=[85, 215, 215])
+            t.setStyle(TableStyle([
+                ('BACKGROUND', (0,0), (-1,0), colors.HexColor("#0f766e")),
+                ('TEXTCOLOR', (0,0), (-1,0), colors.whitesmoke),
+                ('ALIGN', (0,0), (-1,-1), 'LEFT'),
+                ('FONTNAME', (0,0), (-1,0), bold_font_name),
+                ('BOTTOMPADDING', (0,0), (-1,0), 6),
+                ('TOPPADDING', (0,0), (-1,0), 6),
+                ('BACKGROUND', (0,1), (-1,-1), colors.HexColor("#F8FAFC")), 
+                ('GRID', (0,0), (-1,-1), 1, colors.HexColor("#E2E8F0")),
+                ('VALIGN', (0, 0), (-1, -1), 'TOP')
+            ]))
+            story.append(t)
+            story.append(Spacer(1, 15))
+            bekleme_table_data = []
+
+        if in_checklist and "->" not in line:
+            in_checklist = False
+            if len(checklist_data) > 1:
+                t = Table(checklist_data, colWidths=[30, 150, 335])
+                t.setStyle(TableStyle([
+                    ('BACKGROUND', (0,0), (-1,0), colors.HexColor("#0f172a")),
+                    ('TEXTCOLOR', (0,0), (-1,0), colors.whitesmoke),
+                    ('ALIGN', (0,0), (-1,-1), 'LEFT'),
+                    ('FONTNAME', (0,0), (-1,0), bold_font_name),
+                    ('BOTTOMPADDING', (0,0), (-1,0), 6),
+                    ('GRID', (0,0), (-1,-1), 1, colors.HexColor("#CBD5E1")),
+                    ('VALIGN', (0, 0), (-1, -1), 'TOP')
+                ]))
+                story.append(t)
+                story.append(Spacer(1, 15))
+            elif checklist_data:
+                story.append(Paragraph(checklist_data[0][1], style_normal))
+            checklist_data = []
+
+        if not line:
+            if in_summary_box and summary_content:
+                summary_content.append(Spacer(1, 6))
+            elif not in_summary_box:
+                story.append(Spacer(1, 6))
+            continue
+
+        if line.startswith("[MAKİNE:"):
+            if not in_durus_table:
+                in_durus_table = True
+                durus_table_data.append(["Makine", "Zaman", "Süre", "Neden", "Sıklık / Kritik"])
+            
+            parts = line.split(" | ")
+            row_dict = {}
+            for p in parts:
+                p = p.strip("[]")
+                if ":" in p:
+                    key, val = p.split(":", 1)
+                    row_dict[key.strip()] = val.strip()
+            
+            makine = row_dict.get("MAKİNE", "-").upper()
+            zaman_str = row_dict.get("ZAMAN", "-")
+            sure = row_dict.get("SAF_SÜRE", "-").replace("dakika", "dk")
+            neden_str = row_dict.get("NEDEN", "-")
+            if "ÜRETİM_KAYBI" in row_dict:
+                neden_str += f"<br/><font color='#dc2626'><i>Kayıp: {row_dict['ÜRETİM_KAYBI']}</i></font>"
+            
+            siklik_str = row_dict.get("SIKLIK", "")
+            kritik_str = ""
+            if "KRİTİK_UYARI" in row_dict or "[KRİTİK_UYARI: DÜN DE YAŞANDI!]" in line:
+                kritik_str = "<br/><font color='#dc2626'><b>⚠ DÜN DE YAŞANDI!</b></font>"
+            
+            siklik_full = (siklik_str + kritik_str).strip()
+            if not siklik_full: siklik_full = "-"
+            
+            durus_table_data.append([ makine, Paragraph(zaman_str, style_normal), sure, Paragraph(neden_str, style_normal), Paragraph(siklik_full, style_normal) ])
+            continue
+
+        if line.startswith("[BEKLEME]"):
+            if not in_bekleme_table:
+                in_bekleme_table = True
+                bekleme_table_data.append(["Makine", "Operatör Kaynaklı", "Makine Kaynaklı"])
+            
+            parts = line.split(" | ")
+            row_dict = {}
+            for p in parts:
+                p = p.strip("[]")
+                if ":" in p:
+                    key, val = p.split(":", 1)
+                    row_dict[key.strip()] = val.strip()
+            
+            makine = row_dict.get("MAKİNE", "-").upper()
+            op_sure = row_dict.get("OPERATÖR", "-")
+            mak_sure = row_dict.get("MAKİNE_DURUŞ", "-")
+            
+            op_p = Paragraph(f"<b><font color='#dc2626'>{op_sure}</font></b>", style_normal) if op_sure not in ["0 dk", "0.0 dk", "-"] else Paragraph(op_sure, style_normal)
+            mak_p = Paragraph(f"<b><font color='#eab308'>{mak_sure}</font></b>", style_normal) if mak_sure not in ["0 dk", "0.0 dk", "-"] else Paragraph(mak_sure, style_normal)
+            bekleme_table_data.append([makine, op_p, mak_p])
+            continue
+
+        # --- YÖNETİCİ ÖZETİ PARSER KODU ---
+        if line.startswith("---") and line.endswith("---") and "ÖZETİ" in line.upper():
+            baslik_metni = line.replace("-", "").strip()
+            story.append(Paragraph(baslik_metni, style_h1))
+            in_summary_box = True
+            continue
+            
+        if in_summary_box and line.startswith("------------------"):
+            in_summary_box = False
+            if summary_content:
+                table_data = [[item] for item in summary_content] 
+                ozet_kutusu = Table(table_data, colWidths=[515])
+                ozet_kutusu.setStyle(TableStyle([
+                    ('BACKGROUND', (0, 0), (-1, -1), colors.HexColor("#F8FAFC")), 
+                    ('BOX', (0, 0), (-1, -1), 1, colors.HexColor("#3B82F6")), 
+                    ('TOPPADDING', (0, 0), (-1, -1), 2), 
+                    ('BOTTOMPADDING', (0, 0), (-1, -1), 2),
+                    ('LEFTPADDING', (0, 0), (-1, -1), 15),
+                    ('RIGHTPADDING', (0, 0), (-1, -1), 15),
+                    ('VALIGN', (0, 0), (-1, -1), 'TOP')
+                ]))
+                story.append(ozet_kutusu)
+                story.append(Spacer(1, 15))
+                summary_content = []
+            continue
+            
+        # Standart metin ayrıştırma
+        import re
+        line = re.sub(r'\*\*(.*?)\*\*', r'<b>\1</b>', line)
+        alert_words = ["ACİL BAKIM", "ACİL EYLEM", "DÜN de", "Darboğaz", "KRONİK SORUN UYARISI"]
+        for word in alert_words:
+            line = re.sub(f"({word})", r'<font color="red"><b>\1</b></font>', line, flags=re.IGNORECASE)
+            
+        if line.startswith("ÜRETİM MÜDÜRÜ İÇİN") or line.startswith("BÖLÜM "):
+            p = Paragraph(line, style_h1)
+        elif re.match(r'^\d\.\s', line): 
+            p = Paragraph(line, style_h2)
+        elif line.startswith("- ") or line.startswith("• "):
+            line = line.replace("- ", "&bull; ", 1).replace("• ", "&bull; ", 1)
+            p = Paragraph(line, bullet_style)
+        else:
+            p = Paragraph(line, style_normal)
+            
+        if in_summary_box:
+            summary_content.append(p)
+        else:
+            story.append(p)
+            
+    doc.build(story)
+    return pdf_filename
+
+def shap_muhendislik_yorumu_uret(makine_ismi, risk_skoru, nedenler_listesi, periyot="gunluk"):
+    if not nedenler_listesi: return ""
+    nedenler_str = " ve ".join(nedenler_listesi)
+    zaman_ifadesi = "gelecek haftaya yönelik" if periyot == "haftalik" else "yarına yönelik"
+    
+    prompt = f"""
+    Sen kıdemli bir Endüstriyel Bakım ve Güvenilirlik (Reliability) Mühendisisin.
+    Elimizde '{makine_ismi}' adlı makine için hesaplanan kestirimci bakım verileri var.
+    Bu makinenin {zaman_ifadesi} arıza/duruş risk skoru %{risk_skoru} olarak hesaplanmıştır.
+    Yapay Zeka algoritmasına göre bu riskin en büyük temel sebepleri şunlardır: '{nedenler_str}'.
+    GÖREV: Bu verileri birleştirerek mantıklı bir teknik HİPOTEZ üret.
+    """
+    payload = {
+        "model": "llama3.1", 
+        "prompt": prompt, 
+        "stream": False,
+        "options": {"temperature": 0.4, "top_p": 0.9} 
+    }
+    try:
+        response = requests.post("http://localhost:11434/api/generate", json=payload, timeout=60)
+        if response.status_code == 200:
+            return response.json().get('response', '').strip()
+    except Exception:
+        pass
+    return f"Makine geçmişi incelendiğinde '{nedenler_str}' kaynaklı risk artışı tespit edilmiştir. Detaylı mekanik muayene önerilir."
+
+# ==========================================================
+# 18. ON-PREMISE EXCHANGE (SMTP RELAY) İLE OTOMATİK MAİL
+# ==========================================================
+def send_email_via_exchange_smtp(pdf_file_path, recipient_email, en_verimli_isimler, en_darbogaz_isimler, tahmin_tarihi):
+    print("\n[BİLGİ] Rapor yerel ağ üzerinden (On-Premise Exchange) gönderiliyor...")
+    
+    # --- ANONİMLEŞTİRİLMİŞ E-POSTA AYARLARI ---
+    EXCHANGE_SERVER_IP = "smtp.yourcompany.local" 
+    EXCHANGE_PORT = 25 
+    SENDER_EMAIL = "ai-system@yourcompany.com"
+    
+    msg = MIMEMultipart()
+    msg['From'] = SENDER_EMAIL
+    msg['To'] = ", ".join(recipient_email) if isinstance(recipient_email, list) else recipient_email
+    msg['Subject'] = f"Yapay Zeka Günlük Raporu - {tahmin_tarihi}"
+    
+    html_body = f"""
+    <html>
+    <body style='font-family: Calibri, sans-serif;'>
+        <h2>Sayın Yönetici,</h2>
+        <p><b>{tahmin_tarihi}</b> tarihli Kestirimci Bakım ve Üretim Performans raporunuz yapay zeka platformu tarafından oluşturulmuş ve ektedir.</p>
+        <p><b>Günün Özet Tablosu:</b></p>
+        <ul>
+            <li>Günün Yıldız Makinesi / Makineleri: <b>{en_verimli_isimler}</b></li>
+            <li>Günün Darboğaz Makinesi / Makineleri: <b>{en_darbogaz_isimler}</b></li>
+        </ul>
+        <p><b>📁 Rapor Arşivi:</b> Geçmiş tüm raporlara ve analiz detaylarına ulaşmak için <a href='http://localhost:8080/'>Yerel Rapor Arşivi Portalına</a> tıklayabilirsiniz.</p>
+        <p>İyi çalışmalar dileriz.<br><br>
+        <span style='font-size: 12px; color: gray;'><i>Bu e-posta, Python AI Otomasyon Sistemi tarafından On-Premise sunucu üzerinden gönderilmiştir.</i></span></p>
+    </body>
+    </html>
+    """
+    msg.attach(MIMEText(html_body, 'html'))
+    
+    with open(pdf_file_path, "rb") as f:
+        pdf_attachment = MIMEApplication(f.read(), _subtype="pdf")
+        pdf_attachment.add_header('Content-Disposition', 'attachment', filename=os.path.basename(pdf_file_path))
+        msg.attach(pdf_attachment)
+    
+    try:
+        with smtplib.SMTP(EXCHANGE_SERVER_IP, EXCHANGE_PORT) as server:
+            server.send_message(msg)
+        print(f"✅ Rapor başarıyla {recipient_email} adresine Exchange üzerinden gönderildi!")
+    except Exception as e:
+        print(f"❌ Mail gönderilemedi. Hata Detayı: {str(e)}")
+
+# ==========================================================
+# 2 VERİ OKUMA (ANONİMLEŞTİRİLMİŞ)
+# ==========================================================
+def fetch_data_from_sql_to_excel(uretim_excel, ariza_excel, bitis_tarihi_str):
+    print("\n[BİLGİ] SQL Server'dan son 1 aylık (90 gün) canlı veriler çekiliyor...")
+    
+    # --- JENERİK SQL BAĞLANTI BİLGİLERİ ---
+    db_sunucu = "127.0.0.1" 
+    db_port = "1433"
+    db_kullanici = "db_user"
+    db_sifre_ham = "db_password"  
+    db_sifre_guvenli = urllib.parse.quote_plus(db_sifre_ham)
+    db_isim = "factory_db"
+    baglanti_url = f"mssql+pyodbc://{db_kullanici}:{db_sifre_guvenli}@{db_sunucu}:{db_port}/{db_isim}?driver=ODBC+Driver+17+for+SQL+Server&Encrypt=yes&TrustServerCertificate=yes"
+    
+    try:
+        engine = create_engine(baglanti_url)
+        bitis_tarihi = pd.to_datetime(bitis_tarihi_str)
+        baslangic_tarihi = bitis_tarihi - timedelta(days=90)
+        
+        bitis_str = bitis_tarihi.strftime('%Y-%m-%d')
+        baslangic_str = baslangic_tarihi.strftime('%Y-%m-%d')
+        
+        with engine.connect() as connection:
+            query_table2 = f"SELECT * FROM production_logs WHERE CAST(start_tarih AS DATE) BETWEEN '{baslangic_str}' AND '{bitis_str}'"
+            df_table2 = pd.read_sql(query_table2, con=connection)
+            
+            query_ariza = f"SELECT * FROM error_logs WHERE CAST(ariza_zaman AS DATE) BETWEEN '{baslangic_str}' AND '{bitis_str}'"
+            df_ariza = pd.read_sql(query_ariza, con=connection)
+            
+            if not df_table2.empty:
+                df_table2.to_excel(uretim_excel, index=False)
+                print(f"✅ ÜRETİM EXCEL DOSYASI GÜNCELLENDİ ({len(df_table2)} satır).")
+            if not df_ariza.empty:
+                df_ariza.to_excel(ariza_excel, index=False)
+                print(f"✅ ARIZA EXCEL DOSYASI GÜNCELLENDİ ({len(df_ariza)} satır).")
+                
+    except Exception as e:
+        print("❌ Veritabanı Bağlantı Hatası veya Veri Çekilemedi.")
+        print("⚠️ HATA: Canlı veri çekilemediği için bilgisayardaki mevcut son Excel dosyaları ile analize devam edilecek...")
+
+def load_and_merge(uretim_file, ariza_file):
+    uretim = pd.read_excel(uretim_file)
+    ariza = pd.read_excel(ariza_file)
+    
+    gecerli_makineler = [str(k) for k in MACHINE_NAME_MAP.keys()]
+    uretim = uretim[uretim['Makinekimlik'].astype(str).str.replace('.0', '', regex=False).isin(gecerli_makineler)]
+    ariza = ariza[ariza['Makinekimlik'].astype(str).str.replace('.0', '', regex=False).isin(gecerli_makineler)]
+    
+    uretim['Makinekimlik'] = uretim['Makinekimlik'].astype(str).str.replace('.0', '', regex=False).astype(int)
+    ariza['Makinekimlik'] = ariza['Makinekimlik'].astype(str).str.replace('.0', '', regex=False).astype(int)
+    
+    uretim = uretim[['ID', 'Basladi_tarih', 'start_tarih', 'stop_tarih', 'uretimadet', 'Makinekimlik', 'uretim_sure_sn']]
+    uretim.columns = ['id', 'basladi', 'start', 'stop', 'uretimadet', 'Makinekimlik', 'sure']
+    ariza = ariza[['id', 'ariza_zaman', 'ariza_aciklama', 'Makinekimlik']]
+    ariza.columns = ['id', 'ariza_zaman', 'aciklama', 'Makinekimlik']
+    
+    uretim['start'] = pd.to_datetime(uretim['start'])
+    uretim['stop'] = pd.to_datetime(uretim['stop'])
+    ariza['ariza_zaman'] = pd.to_datetime(ariza['ariza_zaman'])
+    uretim['date'] = uretim['stop'].dt.date
+    ariza['date'] = ariza['ariza_zaman'].dt.date
+
+    import datetime
+    sinir_saat = datetime.time(15, 5) 
+    silinecek_u_indexler = []
+    silinecek_a_indexler = []
+    
+    for gun in uretim['start'].dt.date.unique():
+        gunluk_u = uretim[uretim['start'].dt.date == gun]
+        mesai_sonrasi_u = gunluk_u[gunluk_u['start'].dt.time > sinir_saat]
+        
+        if not mesai_sonrasi_u.empty:
+            aktif_makineler = mesai_sonrasi_u['Makinekimlik'].unique()
+            if len(aktif_makineler) < 6:
+                silinecek_u_indexler.extend(mesai_sonrasi_u.index.tolist())
+                gunluk_a = ariza[ariza['ariza_zaman'].dt.date == gun]
+                mesai_sonrasi_a = gunluk_a[(gunluk_a['ariza_zaman'].dt.time > sinir_saat) & (gunluk_a['Makinekimlik'].isin(aktif_makineler))]
+                silinecek_a_indexler.extend(mesai_sonrasi_a.index.tolist())
+                
+    uretim = uretim.drop(silinecek_u_indexler)
+    ariza = ariza.drop(silinecek_a_indexler)
+
+    uretim = uretim.sort_values(['Makinekimlik', 'start'])
+    uretim['onceki_stop'] = uretim.groupby(['date', 'Makinekimlik'])['stop'].shift(1)
+    uretim['mudahale_suresi_sn'] = (uretim['start'] - uretim['onceki_stop']).dt.total_seconds()
+    uretim['mudahale_suresi_sn'] = uretim['mudahale_suresi_sn'].apply(lambda x: x if 0 <= x <= 3600 else 0)
+    
+    prod = uretim.groupby(['date','Makinekimlik']).agg(
+        production_max=('uretimadet', 'max'),
+        production_min=('uretimadet', 'min'),
+        toplam_bekleme_sn=('mudahale_suresi_sn', 'sum'),
+        ortalama_cevrim_sn=('sure', 'mean')
+    ).reset_index()
+    prod['production'] = prod['production_max'] - prod['production_min'] + 1
+    prod = prod.drop(columns=['production_max', 'production_min'])
+    
+    faults = ariza.groupby(['date','Makinekimlik']).agg(
+        faults=('id','count')
+    ).reset_index()
+    
+    df = pd.merge(prod, faults, on=['date','Makinekimlik'], how="outer")
+    df = df.fillna(0)
+    df['operator_bekleme_dk'] = (df['toplam_bekleme_sn'] / 60).round(1)
+    df = df.drop(columns=['toplam_bekleme_sn'])
+    df = df.rename(columns={'Makinekimlik':'machine_id'})
+    df['date'] = pd.to_datetime(df['date'])
+    df = df.sort_values(['machine_id','date'])
+    
+    return df, uretim, ariza
+
+# --- DİNAMİK / GÖRECELİ DOSYA YOLLARI ---
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+uretim_dosya = os.path.join(SCRIPT_DIR, "uretim_tablosu.xlsx")
+ariza_dosya = os.path.join(SCRIPT_DIR, "ariza_tablosu.xlsx")
+
+from datetime import datetime
+tahmin_tarihi = datetime.now().strftime("%Y-%m-%d")
+
+fetch_data_from_sql_to_excel(uretim_dosya, ariza_dosya, tahmin_tarihi)
+df, uretim_ham, ariza_ham = load_and_merge(uretim_dosya, ariza_dosya)
+
+# ==========================================================
+# 3 FEATURE ENGINEERING
+# ==========================================================
+def create_features(df):
+    g = df.groupby("machine_id")
+    df["prod_lag1"] = g["production"].shift(1)
+    df["prod_lag2"] = g["production"].shift(2)
+    df["fault_lag1"] = g["faults"].shift(1)
+    df["fault_lag2"] = g["faults"].shift(2)
+    df["prod_roll5"] = g["production"].transform(lambda x: x.rolling(5, min_periods=1).mean())
+    df["fault_roll5"] = g["faults"].transform(lambda x: x.rolling(5, min_periods=1).mean())
+    df["prod_std5"] = g["production"].transform(lambda x: x.rolling(5, min_periods=1).std()).fillna(0)
+    df["fault_std5"] = g["faults"].transform(lambda x: x.rolling(5, min_periods=1).std()).fillna(0)
+    df["prod_trend"] = df["prod_lag1"] - df["prod_lag2"]
+    df["fault_trend"] = df["fault_lag1"] - df["fault_lag2"]
+    df["weekday"] = df["date"].dt.weekday 
+    df["prod_roll7"] = g["production"].transform(lambda x: x.rolling(7, min_periods=1).mean())
+    df["fault_roll7"] = g["faults"].transform(lambda x: x.rolling(7, min_periods=1).mean())
+    df["fault_accel"] = df["fault_trend"] - g["faults"].shift(2).sub(g["faults"].shift(3)).fillna(0) 
+    df["prod_fault_ratio"] = (df["production"] / (df["faults"] + 1)).round(2) 
+    df = df.fillna(0)
+    df["target_next_fault"] = g["faults"].shift(-1)
+    df["fault_binary"] = (df["target_next_fault"] > (df["fault_roll5"] * 1.2)).astype(int)
+    df["target_next_prod"] = g["production"].shift(-1)
+    return df
+
+df = create_features(df)
+
+features = [
+    "production","faults","prod_lag1","prod_lag2","fault_lag1","fault_lag2",
+    "prod_roll5","fault_roll5","prod_std5","fault_std5","prod_trend","fault_trend",
+    "weekday","prod_roll7","fault_roll7","fault_accel","prod_fault_ratio",
+    "operator_bekleme_dk","ortalama_cevrim_sn"
+]
+train_df = df.dropna(subset=["target_next_fault", "target_next_prod"]).copy()
+
+from sklearn.metrics import mean_absolute_error, mean_squared_error, accuracy_score, f1_score
+split_date = pd.to_datetime(tahmin_tarihi) - pd.Timedelta(days=7)
+train_mask = train_df["date"] < split_date
+test_mask = train_df["date"] >= split_date
+
+X_train = train_df.loc[train_mask, features]
+X_test = train_df.loc[test_mask, features]
+y_train_reg_fault = train_df.loc[train_mask, "target_next_fault"]
+y_test_reg_fault = train_df.loc[test_mask, "target_next_fault"]
+y_train_clf_fault = train_df.loc[train_mask, "fault_binary"]
+y_test_clf_fault = train_df.loc[test_mask, "fault_binary"]
+y_train_reg_prod = train_df.loc[train_mask, "target_next_prod"]
+y_test_reg_prod = train_df.loc[test_mask, "target_next_prod"]
+
+X_full = train_df[features]
+y_reg_fault = train_df["target_next_fault"]
+y_clf_fault = train_df["fault_binary"]
+y_reg_prod = train_df["target_next_prod"]
+
+n_neg = (y_clf_fault == 0).sum()
+n_pos = (y_clf_fault == 1).sum()
+imbalance_ratio = n_neg / n_pos if n_pos > 0 else 1.0
+
+reg_model = XGBRegressor(n_estimators=400, learning_rate=0.03, max_depth=6, random_state=42)
+clf_model = XGBClassifier(n_estimators=300, learning_rate=0.05, max_depth=5, random_state=42, scale_pos_weight=imbalance_ratio)
+prod_model = XGBRegressor(n_estimators=400, learning_rate=0.03, max_depth=6, random_state=42)
+
+if len(X_train) > 10 and len(X_test) > 3:
+    reg_model.fit(X_train, y_train_reg_fault)
+    clf_model.fit(X_train, y_train_clf_fault)
+    prod_model.fit(X_train, y_train_reg_prod)
+    
+    test_pred_fault = np.maximum(0, reg_model.predict(X_test))
+    test_pred_clf = clf_model.predict(X_test)
+    test_pred_prod = np.maximum(0, prod_model.predict(X_test))
+    
+    mae_fault = mean_absolute_error(y_test_reg_fault, test_pred_fault)
+    rmse_fault = np.sqrt(mean_squared_error(y_test_reg_fault, test_pred_fault))
+    mae_prod = mean_absolute_error(y_test_reg_prod, test_pred_prod)
+    rmse_prod = np.sqrt(mean_squared_error(y_test_reg_prod, test_pred_prod))
+    acc_clf = accuracy_score(y_test_clf_fault, test_pred_clf)
+    f1_clf = f1_score(y_test_clf_fault, test_pred_clf, zero_division=0)
+else:
+    print("⚠️ Test seti için yeterli veri yok, validasyon atlanıyor.")
+
+reg_model.fit(X_full, y_reg_fault)
+clf_model.fit(X_full, y_clf_fault)
+prod_model.fit(X_full, y_reg_prod)
+
+explainer_reg = shap.TreeExplainer(reg_model)
+explainer_clf = shap.TreeExplainer(clf_model)
+tarih = pd.to_datetime(tahmin_tarihi)
+latest = df[df["date"]==tarih].copy()
+X_latest = latest[features]
+fault_pred = reg_model.predict(X_latest)
+prob_pred = clf_model.predict_proba(X_latest)[:,1]
+prod_pred = prod_model.predict(X_latest)
+
+latest["pred_fault"] = np.maximum(0, fault_pred)
+latest["fault_probability"] = prob_pred
+latest["pred_prod"] = np.maximum(0, prod_pred)
+
+hist_stats = df[df["date"] < tarih].groupby("machine_id")["faults"].agg(['mean', 'std']).fillna(0)
+global_mean_faults = hist_stats['mean'].mean() if not hist_stats.empty else 1.0
+global_std_faults = hist_stats['std'].mean() if not hist_stats.empty else 1.0
+dynamic_min_margin = max(1.0, global_std_faults) 
+
+mean_faults = latest["machine_id"].map(hist_stats["mean"]).fillna(global_mean_faults)
+std_margin = (2 * latest["machine_id"].map(hist_stats["std"]).fillna(global_std_faults)).clip(lower=dynamic_min_margin)
+excess_faults = np.maximum(0, latest["pred_fault"] - mean_faults)
+latest["risk_score"] = (np.minimum(excess_faults / std_margin, 1.0) * 70) + (latest["fault_probability"] * 30)
+
+latest["risk_score"] = latest["risk_score"].clip(0, 100)
+latest["health_score"] = 100 - latest["risk_score"]
+latest["health_score"] = latest["health_score"].clip(0, 100)
+
+shap_values_reg = explainer_reg.shap_values(X_latest)
+shap_values_clf = explainer_clf.shap_values(X_latest)
+
+top_causes = {}
+for i, row in enumerate(latest.itertuples()):
+    machine = row.machine_id
+    sv_reg = shap_values_reg[i]
+    sv_clf_raw = shap_values_clf[i] if len(np.array(shap_values_clf).shape) == 2 else shap_values_clf[1][i]
+    sv_combined = (np.abs(sv_reg) * 0.7) + (np.abs(sv_clf_raw) * 0.3)
+    sv_direction = np.sign(sv_reg) 
+    idx = np.argsort(sv_combined)[-3:][::-1]
+    
+    toplam_shap_etkisi = np.sum(sv_combined)
+    causes_with_weights = []
+    for j in idx:
+        etki_yuzdesi = int((sv_combined[j] / toplam_shap_etkisi) * 100) if toplam_shap_etkisi > 0 else 0
+        yon_etiketi = "↑" if sv_direction[j] > 0 else "↓"
+        causes_with_weights.append((features[j], etki_yuzdesi, yon_etiketi))
+        
+    top_causes[machine] = causes_with_weights
+
+def biyolojik_vardiya_bolgesi_bul(saat_str):
+    try:
+        baslangic_saati_str = saat_str.split('-')[0].strip()
+        saat = int(baslangic_saati_str.split(':')[0])
+        dakika = int(baslangic_saati_str.split(':')[1])
+        
+        ondalik_saat = saat + (dakika / 60.0)
+        if 7.0 <= ondalik_saat < 9.5: return "[Sabah Rehaveti / Vardiya Başı]"
+        elif 9.5 <= ondalik_saat < 11.0: return "[Sabah Yüksek Tempo Bölgesi]"
+        elif 11.0 <= ondalik_saat < 12.5: return "[Öğle Molası Öncesi Düşüş]"
+        elif 12.5 <= ondalik_saat < 15.5: return "[Öğle Sonrası Rehavet]"
+        elif 15.5 <= ondalik_saat < 18.0: return "[Vardiya Sonu Yorgunluğu]"
+        else: return "[Mesai Dışı / Gece]"
+    except:
+        return "[Bilinmeyen Zaman]"
+
+hedef_tarih_dt = pd.to_datetime(tahmin_tarihi).date()
+gunluk_uretim = uretim_ham[uretim_ham['date'] == hedef_tarih_dt].copy()
+gunluk_ariza = ariza_ham[ariza_ham['date'] == hedef_tarih_dt].copy()
+uretim_ham_copy = uretim_ham.copy()
+uretim_ham_copy['toplam_cevrim_sn'] = (uretim_ham_copy['stop'] - uretim_ham_copy['start']).dt.total_seconds()
+uretim_ham_copy['gercek_cozum_sn'] = uretim_ham_copy['toplam_cevrim_sn'] - 87
+uretim_ham_copy.loc[uretim_ham_copy['gercek_cozum_sn'] < 0, 'gercek_cozum_sn'] = 0
+ariza_sorted = ariza_ham.sort_values('ariza_zaman')
+uretim_sorted = uretim_ham_copy.sort_values('start')
+ariza_sorted['Makinekimlik'] = ariza_sorted['Makinekimlik'].astype(int)
+uretim_sorted['Makinekimlik'] = uretim_sorted['Makinekimlik'].astype(int)
+
+merged_all = pd.merge_asof(
+    ariza_sorted, 
+    uretim_sorted[['start', 'stop', 'gercek_cozum_sn', 'Makinekimlik']], 
+    left_on='ariza_zaman', 
+    right_on='start', 
+    by='Makinekimlik',
+    direction='backward'
+)
+merged_all = merged_all[merged_all['ariza_zaman'] <= merged_all['stop']]
+tarihi_alarm_sureleri = merged_all.groupby('aciklama')['gercek_cozum_sn'].mean().to_dict()
+gunluk_merged = merged_all[merged_all['ariza_zaman'].dt.date == hedef_tarih_dt]
+
+ariza_kategorileri = {"Sistem/Ağ Bağlantısı": 0, "Sensör Hataları": 0, "Valf Sorunları": 0, "Basınç/Pnömatik": 0, "Diğer Mekanik Sorunlar": 0}
+for aciklama in gunluk_ariza['aciklama']:
+    txt = str(aciklama).upper()
+    if "SİSTEM" in txt or "AĞ" in txt or "BAĞLANTI" in txt: ariza_kategorileri["Sistem/Ağ Bağlantısı"] += 1
+    elif "SENSÖR" in txt or "SENSOR" in txt: ariza_kategorileri["Sensör Hataları"] += 1
+    elif "VALF" in txt: ariza_kategorileri["Valf Sorunları"] += 1
+    elif "BASINÇ" in txt or "BASINC" in txt: ariza_kategorileri["Basınç/Pnömatik"] += 1
+    else: ariza_kategorileri["Diğer Mekanik Sorunlar"] += 1
+
+makine_istatistikleri = {}
+operator_yavaslik_uyarilari = []
+yorgunluk_anomalileri = [] 
+tum_ritim_verileri = {}
+mesai_ihlali_uyarilari = []
+
+for makine_id in gunluk_uretim['Makinekimlik'].unique():
+    m_uretim = gunluk_uretim[gunluk_uretim['Makinekimlik'] == makine_id].copy()
+    m_ariza = gunluk_ariza[gunluk_ariza['Makinekimlik'] == makine_id].copy()
+    m_bugun_merged = gunluk_merged[gunluk_merged['Makinekimlik'] == makine_id].copy()
+
+    if not m_uretim.empty:
+        ilk_islem = m_uretim['start'].min()
+        son_islem = m_uretim['stop'].max()
+        sinir_sabah = pd.Timestamp.combine(hedef_tarih_dt, pd.to_datetime("08:00:00").time())
+        sinir_aksam = pd.Timestamp.combine(hedef_tarih_dt, pd.to_datetime("17:00:00").time())
+        
+        ihlal_nedenleri = []
+        if pd.notna(ilk_islem) and ilk_islem > sinir_sabah:
+            ihlal_nedenleri.append(f"üretime geç başlama ({ilk_islem.strftime('%H:%M')})")
+        if pd.notna(son_islem) and son_islem < sinir_aksam:
+            ihlal_nedenleri.append(f"erken paydos ({son_islem.strftime('%H:%M')})")
+            
+        if ihlal_nedenleri:
+            mesai_ihlali_uyarilari.append(f"{get_machine_name(makine_id)} [{' ve '.join(ihlal_nedenleri)}]")
+
+    toplam_uretim = int(m_uretim['uretimadet'].max() - m_uretim['uretimadet'].min() + 1) if not m_uretim.empty else 0
+    toplam_ariza = len(m_ariza)
+    makine_olaylari = []
+
+    m_hist_merged = merged_all[merged_all['Makinekimlik'] == makine_id].copy()
+    if len(m_hist_merged) > 10: 
+        m_hist_merged['saat'] = m_hist_merged['ariza_zaman'].dt.hour
+        iso_model = IsolationForest(contamination=0.10, random_state=42)
+        X_iso_hist = m_hist_merged[['saat', 'gercek_cozum_sn']].fillna(0)
+        m_hist_merged['anomali'] = iso_model.fit_predict(X_iso_hist)
+        
+        if not m_bugun_merged.empty:
+            m_bugun_merged['saat'] = m_bugun_merged['ariza_zaman'].dt.hour
+            mesai_bugun = m_bugun_merged[m_bugun_merged['saat'] >= 7].copy()
+            
+            if not mesai_bugun.empty:
+                mesai_bugun['tarihi_beklenen_sn'] = mesai_bugun['aciklama'].map(tarihi_alarm_sureleri).fillna(mesai_bugun['gercek_cozum_sn'].mean())
+                X_iso_bugun = mesai_bugun[['saat', 'gercek_cozum_sn']].fillna(0)
+                mesai_bugun['anomali'] = iso_model.predict(X_iso_bugun)
+                
+                yavas_anomaliler = mesai_bugun[
+                    (mesai_bugun['anomali'] == -1) & 
+                    (mesai_bugun['gercek_cozum_sn'] > mesai_bugun['gercek_cozum_sn'].mean()) &
+                    (mesai_bugun['gercek_cozum_sn'] > mesai_bugun['tarihi_beklenen_sn'])
+                ].sort_values('ariza_zaman')
+                
+                if len(yavas_anomaliler) >= 2:
+                    yavas_anomaliler['zaman_farki'] = yavas_anomaliler['ariza_zaman'].diff()
+                    yavas_anomaliler['blok_id'] = (yavas_anomaliler['zaman_farki'] > pd.Timedelta(minutes=45)).cumsum()
+                    en_kotu_blok_id = yavas_anomaliler.groupby('blok_id')['gercek_cozum_sn'].sum().idxmax()
+                    en_kotu_blok = yavas_anomaliler[yavas_anomaliler['blok_id'] == en_kotu_blok_id]
+                    
+                    baslangic = en_kotu_blok['ariza_zaman'].min()
+                    bitis = en_kotu_blok['ariza_zaman'].max()
+                    if (bitis - baslangic).total_seconds() < 900: 
+                        bitis = baslangic + pd.Timedelta(minutes=15)
+                    
+                    mola_kesinti_sn = 0
+                    for m_bas_h, m_bas_m, m_bit_h, m_bit_m in [(9,0, 9,15), (12,0, 12,30), (15,0, 15,30)]:
+                        mola_bas = baslangic.replace(hour=m_bas_h, minute=m_bas_m, second=0)
+                        mola_bit = baslangic.replace(hour=m_bit_h, minute=m_bit_m, second=0)
+                        kesisim_bas = max(baslangic, mola_bas)
+                        kesisim_bit = min(bitis, mola_bit)
+                        if kesisim_bas < kesisim_bit:
+                            mola_kesinti_sn += (kesisim_bit - kesisim_bas).total_seconds()
+                            
+                    toplam_sure_sn = (bitis - baslangic).total_seconds()
+                    saf_sure_sn = toplam_sure_sn - mola_kesinti_sn
+                    saf_sure_dk = int(saf_sure_sn / 60)
+                    
+                    if saf_sure_dk >= 10:
+                        bas_str = baslangic.strftime('%H:%M')
+                        bit_str = bitis.strftime('%H:%M')
+                        aralik_alarm_sn = en_kotu_blok['gercek_cozum_sn'].mean()
+                        genel_alarm_sn = mesai_bugun['gercek_cozum_sn'].mean()
+                        m_uretim_copy = m_uretim.copy()
+                        mesai_uretim = m_uretim_copy[m_uretim_copy['start'].dt.hour >= 7]
+                        aralik_uretim = mesai_uretim[(mesai_uretim['start'] >= baslangic) & (mesai_uretim['start'] <= bitis)]
+                        aralik_uretim_adet = int(aralik_uretim['uretimadet'].max() - aralik_uretim['uretimadet'].min() + 1) if not aralik_uretim.empty else 0
+                    
+                        mesai_toplam_adet = int(mesai_uretim['uretimadet'].max() - mesai_uretim['uretimadet'].min() + 1) if not mesai_uretim.empty else 0
+                        ort_dk_adet = mesai_toplam_adet / ((mesai_uretim['stop'].max() - mesai_uretim['start'].min()).total_seconds() / 60) if len(mesai_uretim) > 0 else 0
+                        beklenen_adet = int(ort_dk_adet * saf_sure_dk)
+                    
+                        aralik_cevrim_sn = aralik_uretim['sure'].mean()
+                        genel_cevrim_sn = mesai_uretim['sure'].mean()
+                    
+                        nedenler = []
+                        if pd.notna(aralik_alarm_sn) and aralik_alarm_sn > genel_alarm_sn * 1.2:
+                            nedenler.append("alarmlara müdahalenin geç olması")
+                        if pd.notna(aralik_cevrim_sn) and pd.notna(genel_cevrim_sn) and aralik_cevrim_sn > genel_cevrim_sn * 1.1:
+                            nedenler.append("üretim (operasyon) sürelerinin normalden uzun sürmesi")
+                    
+                        kok_neden_metni = " ve ".join(nedenler) if nedenler else "genel tempo düşüklüğü"
+                        dun_tarihi = hedef_tarih_dt - pd.Timedelta(days=1)
+                        son_30_gun_tarihi = hedef_tarih_dt - pd.Timedelta(days=30)
+                        m_son_30_gun = m_hist_merged[(m_hist_merged['ariza_zaman'].dt.date >= son_30_gun_tarihi) & (m_hist_merged['ariza_zaman'].dt.date < hedef_tarih_dt)]
+                    
+                        genis_baslangic = (baslangic - pd.Timedelta(minutes=45)).time()
+                        genis_bitis = (bitis + pd.Timedelta(minutes=45)).time()
+                        gecmis_anomaliler = m_son_30_gun[
+                            (m_son_30_gun['anomali'] == -1) & 
+                            (m_son_30_gun['ariza_zaman'].dt.time >= genis_baslangic) &
+                            (m_son_30_gun['ariza_zaman'].dt.time <= genis_bitis) &
+                            (m_son_30_gun['gercek_cozum_sn'] > m_son_30_gun['gercek_cozum_sn'].mean())
+                        ]
+                    
+                        anomali_gun_sayisi = len(gecmis_anomaliler['ariza_zaman'].dt.date.unique())
+                        dun_yasandi_mi = dun_tarihi in gecmis_anomaliler['ariza_zaman'].dt.date.values
+                    
+                        makine_olaylari.append({
+                            'tip_yavaslama': True, 'baslangic': baslangic, 'bitis': bitis,
+                            'sure_dk': saf_sure_dk, 'neden': kok_neden_metni,
+                            'yavaslama_beklenen_adet': beklenen_adet, 'yavaslama_gercek_adet': aralik_uretim_adet,
+                            'gecmis_tekrar': anomali_gun_sayisi, 'dun_yasandi_mi': dun_yasandi_mi,
+                            'tip_mikro': False, 'mikro_defa': 0, 'mikro_sure_dk': 0, 'mikro_kayip_adet': 0
+                        })
+
+    m_uretim_bekleme = m_uretim.copy()
+    if not m_uretim_bekleme.empty:
+        m_uretim_bekleme['onceki_stop'] = m_uretim_bekleme['stop'].shift(1)
+        m_uretim_bekleme = m_uretim_bekleme.dropna(subset=['onceki_stop'])
+        m_uretim_bekleme = m_uretim_bekleme[
+            (m_uretim_bekleme['start'] - m_uretim_bekleme['onceki_stop']).dt.total_seconds().between(1, 3600)
+        ].copy()
+        
+        if not m_uretim_bekleme.empty:
+            m_uretim_bekleme['gecikme_sn'] = (m_uretim_bekleme['start'] - m_uretim_bekleme['onceki_stop']).dt.total_seconds() - 10
+            m_uretim_bekleme['mikro_durus_mu'] = 0
+            for idx, row in m_uretim_bekleme.iterrows():
+                ariza_var_mi = m_bugun_merged[(m_bugun_merged['ariza_zaman'] >= row['onceki_stop']) & (m_bugun_merged['ariza_zaman'] <= row['start'])]
+                if ariza_var_mi.empty and row['gecikme_sn'] > 30:
+                    m_uretim_bekleme.at[idx, 'mikro_durus_mu'] = 1
+                    
+            m_uretim_bekleme['mikro_blok'] = (m_uretim_bekleme['mikro_durus_mu'] != m_uretim_bekleme['mikro_durus_mu'].shift(1)).cumsum()
+            mikro_durus_gruplari = m_uretim_bekleme[m_uretim_bekleme['mikro_durus_mu'] == 1].groupby('mikro_blok')
+            
+            for blok_id, grup in mikro_durus_gruplari:
+                if len(grup) >= 3:
+                    m_baslangic = grup['onceki_stop'].min()
+                    m_bitis = grup['start'].max()
+                    m_saf_sure_dk = max(1, int(grup['gecikme_sn'].sum() / 60))
+                    m_kac_defa = len(grup)
+                    
+                    son_30_tarihi_m = pd.to_datetime(tahmin_tarihi).date() - pd.Timedelta(days=30)
+                    gecmis_uretim_m = uretim_ham[(uretim_ham['Makinekimlik'] == makine_id) & (uretim_ham['start'].dt.date >= son_30_tarihi_m) & (uretim_ham['start'].dt.date < pd.to_datetime(tahmin_tarihi).date())].copy()
+                    
+                    gecmis_mikro_gun_sayisi = 0
+                    if not gecmis_uretim_m.empty:
+                        genis_bas_m = (m_baslangic - pd.Timedelta(minutes=45)).time()
+                        genis_bit_m = (m_bitis + pd.Timedelta(minutes=45)).time()
+                        gecmis_uretim_saatlik = gecmis_uretim_m[(gecmis_uretim_m['start'].dt.time >= genis_bas_m) & (gecmis_uretim_m['start'].dt.time <= genis_bit_m)].copy()
+                        if not gecmis_uretim_saatlik.empty:
+                            gecmis_uretim_saatlik = gecmis_uretim_saatlik.sort_values(['date', 'start'])
+                            gecmis_uretim_saatlik['onceki_stop'] = gecmis_uretim_saatlik.groupby('date')['stop'].shift(1)
+                            gecmis_uretim_saatlik = gecmis_uretim_saatlik.dropna(subset=['onceki_stop'])
+                            gecmis_uretim_saatlik['gecikme_sn'] = (gecmis_uretim_saatlik['start'] - gecmis_uretim_saatlik['onceki_stop']).dt.total_seconds() - 10
+                            supheli_gunler = gecmis_uretim_saatlik[gecmis_uretim_saatlik['gecikme_sn'] > 300]['date'].unique()
+                            gecmis_mikro_gun_sayisi = len(supheli_gunler)
+                    
+                    m_uretim_copy = m_uretim.copy()
+                    mesai_uretim_m = m_uretim_copy[m_uretim_copy['start'].dt.hour >= 7]
+                    ort_dk_adet_m = len(mesai_uretim_m) / ((mesai_uretim_m['stop'].max() - mesai_uretim_m['start'].min()).total_seconds() / 60) if len(mesai_uretim_m) > 0 else 0
+                    m_kayip_adet = int(ort_dk_adet_m * m_saf_sure_dk)
+                    
+                    makine_olaylari.append({
+                        'tip_yavaslama': False, 'baslangic': m_baslangic, 'bitis': m_bitis,
+                        'sure_dk': m_saf_sure_dk, 'neden': '',
+                        'yavaslama_beklenen_adet': 0, 'yavaslama_gercek_adet': 0,
+                        'gecmis_tekrar': gecmis_mikro_gun_sayisi, 'dun_yasandi_mi': False,
+                        'tip_mikro': True, 'mikro_defa': m_kac_defa, 'mikro_sure_dk': m_saf_sure_dk, 'mikro_kayip_adet': m_kayip_adet
+                    })
+
+    if makine_olaylari:
+        makine_olaylari.sort(key=lambda x: x['baslangic'])
+        birlestirilmis_bloklar = []
+        
+        for olay in makine_olaylari:
+            if not birlestirilmis_bloklar:
+                birlestirilmis_bloklar.append(olay.copy())
+                continue
+                
+            onceki = birlestirilmis_bloklar[-1]
+            zaman_farki = (olay['baslangic'] - onceki['bitis']).total_seconds() / 60.0
+            
+            if zaman_farki <= 45.0: 
+                onceki['bitis'] = max(onceki['bitis'], olay['bitis'])
+                onceki['sure_dk'] = max(onceki['sure_dk'], olay['sure_dk'])
+                onceki['tip_yavaslama'] = onceki['tip_yavaslama'] or olay['tip_yavaslama']
+                onceki['yavaslama_beklenen_adet'] = max(onceki['yavaslama_beklenen_adet'], olay['yavaslama_beklenen_adet'])
+                onceki['yavaslama_gercek_adet'] = max(onceki['yavaslama_gercek_adet'], olay['yavaslama_gercek_adet'])
+                if olay['neden'] and olay['neden'] not in onceki['neden']:
+                    onceki['neden'] = onceki['neden'] + (" ve " + olay['neden'] if onceki['neden'] else olay['neden'])
+                onceki['tip_mikro'] = onceki['tip_mikro'] or olay['tip_mikro']
+                onceki['mikro_defa'] += olay['mikro_defa']
+                onceki['mikro_sure_dk'] += olay['mikro_sure_dk']
+                onceki['mikro_kayip_adet'] += olay['mikro_kayip_adet']
+                onceki['gecmis_tekrar'] = max(onceki['gecmis_tekrar'], olay['gecmis_tekrar'])
+                onceki['dun_yasandi_mi'] = onceki['dun_yasandi_mi'] or olay['dun_yasandi_mi']
+            else:
+                birlestirilmis_bloklar.append(olay.copy())
+                
+        for blok in birlestirilmis_bloklar:
+            if blok['tip_mikro']:
+                if blok['tip_yavaslama']:
+                    if blok['mikro_sure_dk'] < 5:
+                        blok['tip_mikro'] = False 
+                else:
+                    if blok['mikro_sure_dk'] < 10:
+                        continue 
+                        
+            bas_str = blok['baslangic'].strftime('%H:%M')
+            bit_str = blok['bitis'].strftime('%H:%M')
+            saat_araligi_str = f"{bas_str}-{bit_str}"
+            vardiya_bolgesi = biyolojik_vardiya_bolgesi_bul(saat_araligi_str)
+            
+            nedenler_listesi = []
+            if blok['tip_yavaslama'] and blok['neden']: nedenler_listesi.append(blok['neden'].capitalize())
+            if blok['tip_mikro']: nedenler_listesi.append("Mikro duruşlar")
+            neden_str = " ve ".join(nedenler_listesi) if nedenler_listesi else "Operatör kaynaklı yavaşlama"
+            
+            kayip_parcalar = []
+            if blok['tip_yavaslama'] and blok['yavaslama_beklenen_adet'] > 0:
+                if blok['yavaslama_gercek_adet'] < blok['yavaslama_beklenen_adet']:
+                    kayip_parcalar.append(f"Beklenen üretim {blok['yavaslama_beklenen_adet']}, gerçekleşen {blok['yavaslama_gercek_adet']} adettir.")
+            
+            if blok['tip_mikro']:
+                giris_metni = "Aynı zamanda operatör" if blok['tip_yavaslama'] else "Operatör"
+                kayip_parcalar.append(f"{giris_metni} {blok['mikro_defa']} defa mikro duruş ile makineyi {blok['mikro_sure_dk']} dk boşta bekletmiş, {blok['mikro_kayip_adet']} ürün kaybı oluşmuştur.")
+            
+            uretim_kaybi_str = " ".join(kayip_parcalar).strip()
+            u_kismi = f"[ÜRETİM_KAYBI: {uretim_kaybi_str}] | " if uretim_kaybi_str else ""
+            
+            siklik_str = f"Son 1 ayda {blok['gecmis_tekrar']} kez tekrarlandı." if blok['gecmis_tekrar'] > 0 else "Yeni bir durum."
+            d_kismi = " | [KRİTİK_UYARI: DÜN DE YAŞANDI!]" if blok['dun_yasandi_mi'] else ""
+            
+            yeni_anomali_mesaji = (
+                f"[MAKİNE: {get_machine_name(makine_id)}] | "
+                f"[ZAMAN: {saat_araligi_str} {vardiya_bolgesi}] | "
+                f"[SAF_SÜRE: {blok['sure_dk']} dakika] | "
+                f"[NEDEN: {neden_str}] | "
+                f"{u_kismi}[SIKLIK: {siklik_str}]{d_kismi}"
+            )
+            
+            if yeni_anomali_mesaji not in yorgunluk_anomalileri:
+                yorgunluk_anomalileri.append(yeni_anomali_mesaji)
+
+    if not m_uretim.empty:
+        son_islem_saati = m_uretim['stop'].max().hour
+        mesai_bitis = 18 if son_islem_saati >= 16 else 15
+    else:
+        mesai_bitis = 15
+    hedef_uretim = 400 if mesai_bitis == 18 else (375 if mesai_bitis == 18 else 275)
+    uretim_farki = toplam_uretim - hedef_uretim
+    max_kesintisiz_dk = (m_ariza.sort_values('ariza_zaman')['ariza_zaman'].diff().dt.total_seconds().max() / 60) if toplam_ariza > 1 else ((m_uretim['sure'].sum()/60) if not m_uretim.empty else 0)
+    
+    yavas_alarmlar = []
+    for alarm_turu in m_bugun_merged['aciklama'].unique():
+        if alarm_turu in tarihi_alarm_sureleri:
+            tarihi_ort = tarihi_alarm_sureleri[alarm_turu]
+            alarm_cozumleri = m_bugun_merged[m_bugun_merged['aciklama'] == alarm_turu]['gercek_cozum_sn']
+            asimli_mudahale_sayisi = (alarm_cozumleri > tarihi_ort).sum()
+            if asimli_mudahale_sayisi >= 5:
+                yavas_alarmlar.append(f"'{alarm_turu}' alarmında {asimli_mudahale_sayisi} defa")
+    
+    if yavas_alarmlar:
+        operator_yavaslik_uyarilari.append(f"{get_machine_name(makine_id)} operatörü {', '.join(yavas_alarmlar)} ortalama çözüm süresini aşmıştır.")
+    
+    ritim_mesaji = ""
+    if not m_uretim.empty:
+        m_uretim_copy2 = m_uretim.copy()
+        mola_saatleri = [9, 12]
+        if mesai_bitis == 18: mola_saatleri.append(15)
+        m_uretim_copy2 = m_uretim_copy2[
+            (m_uretim_copy2['start'].dt.hour >= 7) & 
+            (m_uretim_copy2['start'].dt.hour < mesai_bitis) &
+            (~m_uretim_copy2['start'].dt.hour.isin(mola_saatleri))
+        ]
+        
+        m_uretim_copy2['saat'] = m_uretim_copy2['start'].dt.hour
+        saat_uretim = m_uretim_copy2.groupby('saat').apply(lambda x: int(x['uretimadet'].max() - x['uretimadet'].min() + 1) if not x.empty else 0)
+        
+        m_ariza_saatlik = m_ariza.copy()
+        if not m_ariza_saatlik.empty:
+            m_ariza_saatlik['saat'] = m_ariza_saatlik['ariza_zaman'].dt.hour
+            m_ariza_saatlik = m_ariza_saatlik[
+                (m_ariza_saatlik['saat'] >= 7) & 
+                (m_ariza_saatlik['saat'] < mesai_bitis) &
+                (~m_ariza_saatlik['saat'].isin(mola_saatleri))
+            ]
+            saat_ariza = m_ariza_saatlik.groupby('saat')['ariza_zaman'].count()
+        else:
+            saat_ariza = pd.Series(dtype=int)
+        
+        if len(saat_uretim) >= 2:
+            en_verimli_saat = saat_uretim.idxmax()
+            en_dusuk_saat = saat_uretim.idxmin()
+            ariza_en_dusuk = int(saat_ariza.get(en_dusuk_saat, 0))
+            
+            if not saat_ariza.empty:
+                ariza_zirve_saat = saat_ariza.idxmax()
+                ariza_zirve_sayi = int(saat_ariza.max())
+                ariza_zirve_str = f" Arıza yoğunluğu en yüksek saat: {ariza_zirve_saat:02d}:00-{ariza_zirve_saat+1:02d}:00 ({ariza_zirve_sayi} arıza)."
+            else:
+                ariza_zirve_str = ""
+            
+            if en_verimli_saat != en_dusuk_saat:
+                if ariza_en_dusuk > 0:
+                    neden_str = f" (Bu saat diliminde {ariza_en_dusuk} arıza kaydedilmiştir.)"
+                else:
+                    neden_str = " (Bu saat diliminde arıza kaydı yoktur, düşüş tamamen operatör temposundandır.)"
+                
+                saatler_dict = {str(k): int(v) for k, v in saat_uretim.items()}
+                tum_ritim_verileri[str(makine_id)] = saatler_dict
+                
+                ritim_mesaji = (f"{get_machine_name(makine_id)} saat başı üretim ritmi: En verimli saat {en_verimli_saat:02d}:00-{en_verimli_saat+1:02d}:00 "
+                                f"({saat_uretim[en_verimli_saat]} adet), en düşük saat {en_dusuk_saat:02d}:00-{en_dusuk_saat+1:02d}:00 "
+                                f"({saat_uretim[en_dusuk_saat]} adet).{neden_str}{ariza_zirve_str}")
+            else:
+                ritim_mesaji = f"{get_machine_name(makine_id)} saat başı üretim ritmi: Gün boyu stabil üretim.{ariza_zirve_str}"
+                
+    bekleme_mesaji = ""
+    if not m_uretim.empty:
+        m_uretim_bekleme = m_uretim.copy()
+        m_uretim_bekleme['onceki_stop'] = m_uretim_bekleme['stop'].shift(1)
+        m_uretim_bekleme = m_uretim_bekleme.dropna(subset=['onceki_stop'])
+        m_uretim_bekleme = m_uretim_bekleme[
+            (m_uretim_bekleme['start'] - m_uretim_bekleme['onceki_stop']).dt.total_seconds().between(1, 3600)
+        ].copy() 
+        
+        if not m_uretim_bekleme.empty:
+            operator_bekleme_sn = 0.0
+            makine_bekleme_sn = 0.0
+            
+            for _, row in m_uretim_bekleme.iterrows():
+                bekleme_bas = row['onceki_stop']
+                bekleme_bit = row['start']
+                sure_sn = (bekleme_bit - bekleme_bas).total_seconds()
+                
+                ariza_bu_aralikta = m_ariza[
+                    (m_ariza['ariza_zaman'] >= bekleme_bas) & (m_ariza['ariza_zaman'] <= bekleme_bit)
+                ]
+                
+                if not ariza_bu_aralikta.empty:
+                    makine_bekleme_sn += sure_sn
+                else:
+                    saf_gecikme_sn = sure_sn - 10 
+                    if saf_gecikme_sn > 0:
+                        operator_bekleme_sn += saf_gecikme_sn
+                        
+            op_dk = int(operator_bekleme_sn / 60)
+            mak_dk = int(makine_bekleme_sn / 60)
+            toplam_mola_dk = 75 if mesai_bitis == 18 else 45
+            saf_op_dk = max(0, op_dk - toplam_mola_dk)
+            
+            if saf_op_dk > 0 or mak_dk > 0:
+                bekleme_mesaji = f"[BEKLEME] | [MAKİNE: {get_machine_name(makine_id)}] | [OPERATÖR: {saf_op_dk} dk] | [MAKİNE_DURUŞ: {mak_dk} dk]"
+            else:
+                bekleme_mesaji = f"[BEKLEME] | [MAKİNE: {get_machine_name(makine_id)}] | [OPERATÖR: 0 dk] | [MAKİNE_DURUŞ: 0 dk]"
+        else:
+            bekleme_mesaji = f"[BEKLEME] | [MAKİNE: {get_machine_name(makine_id)}] | [OPERATÖR: -] | [MAKİNE_DURUŞ: -]"
+    else:
+        bekleme_mesaji = f"[BEKLEME] | [MAKİNE: {get_machine_name(makine_id)}] | [OPERATÖR: -] | [MAKİNE_DURUŞ: -]"
+        
+    makine_istatistikleri[int(makine_id)] = {
+        "Toplam_Uretim": int(toplam_uretim),
+        "Hedef_Uretim": hedef_uretim,
+        "Uretim_Farki": int(uretim_farki),
+        "Max_Kesintisiz_Calisma_Dk": round(max_kesintisiz_dk, 1),
+        "Ariza_Sayisi": int(toplam_ariza), 
+        "Ort_Cozum_Sn": float(m_bugun_merged['gercek_cozum_sn'].mean()) if not m_bugun_merged.empty else 0.0,
+        "Toplam_Bekleme_Dk": saf_op_dk if 'saf_op_dk' in locals() else 0,
+        "Ritim_Mesaji": ritim_mesaji,
+        "Bekleme_Mesaji": bekleme_mesaji
+    }
+
+hedef_tarih_dt = pd.to_datetime(tahmin_tarihi).date()
+son_30_gun = hedef_tarih_dt - pd.Timedelta(days=30)
+gecmis_arizalar = ariza_ham[(ariza_ham['date'] >= son_30_gun) & (ariza_ham['date'] < hedef_tarih_dt)]
+kronik_gecmis_mesajlari = []
+
+for makine_id in gunluk_uretim['Makinekimlik'].unique():
+    m_ariza = gunluk_ariza[gunluk_ariza['Makinekimlik'] == makine_id]
+    if not m_ariza.empty:
+        ariza_frekanslari = m_ariza['aciklama'].value_counts()
+        en_sik_ariza = ariza_frekanslari.index[0]
+        bugun_sayi = ariza_frekanslari.iloc[0]
+        
+        m_gecmis = gecmis_arizalar[gecmis_arizalar['Makinekimlik'] == makine_id]
+        gecmis_zirve_tarihi = None
+        
+        if not m_gecmis.empty:
+            for gun in sorted(m_gecmis['date'].unique(), reverse=True):
+                gunluk_gecmis_ariza = m_gecmis[m_gecmis['date'] == gun]
+                if not gunluk_gecmis_ariza.empty:
+                    gecmis_en_sik = gunluk_gecmis_ariza['aciklama'].value_counts().index[0]
+                    if gecmis_en_sik == en_sik_ariza:
+                        gecmis_zirve_tarihi = pd.to_datetime(gun).strftime('%d.%m.%Y')
+                        break
+                        
+        if gecmis_zirve_tarihi:
+            kronik_gecmis_mesajlari.append(f"{get_machine_name(makine_id)} özelinde en çok yaşanan '{en_sik_ariza}' hatası ({bugun_sayi} defa) {gecmis_zirve_tarihi} tarihinde de bu makinenin zirvesindeydi.")
+        else:
+            kronik_gecmis_mesajlari.append(f"{get_machine_name(makine_id)} özelinde bugün en çok tekrarlayan hata '{en_sik_ariza}' ({bugun_sayi} defa) idi.")
+
+ortak_ariza_gruplari = {}
+for makine_id in gunluk_uretim['Makinekimlik'].unique():
+    m_ariza = gunluk_ariza[gunluk_ariza['Makinekimlik'] == makine_id]
+    if not m_ariza.empty:
+        for ariza_adi in m_ariza['aciklama'].value_counts().head(2).index:
+            if ariza_adi not in ortak_ariza_gruplari:
+                ortak_ariza_gruplari[ariza_adi] = []
+            sayi = int(m_ariza[m_ariza['aciklama'] == ariza_adi]['aciklama'].count())
+            ortak_ariza_gruplari[ariza_adi].append(f"{get_machine_name(makine_id)} ({sayi} defa)")
+
+bakim_aksiyon_mesajlari = []
+for ariza_adi, mak_list in sorted(ortak_ariza_gruplari.items(), key=lambda x: len(x[1]), reverse=True):
+    if len(mak_list) >= 2: 
+        bakim_aksiyon_mesajlari.append(f"'{ariza_adi}' hatası: {', '.join(mak_list)} -> Ortak önleyici bakım planlanmalıdır.")
+    else:
+        bakim_aksiyon_mesajlari.append(f"'{ariza_adi}' hatası: {', '.join(mak_list)} -> Tekil bakım önerisi.")
+
+cluster_df = pd.DataFrame.from_dict(makine_istatistikleri, orient='index').reset_index()
+cluster_df.rename(columns={'index': 'Makine'}, inplace=True)
+X_cluster = cluster_df[['Toplam_Uretim', 'Ariza_Sayisi', 'Ort_Cozum_Sn']].fillna(0)
+scaler = StandardScaler()
+X_scaled = scaler.fit_transform(X_cluster)
+kmeans = KMeans(n_clusters=3 if len(cluster_df) >= 3 else len(cluster_df), random_state=42, n_init=10)
+cluster_df['Kume'] = kmeans.fit_predict(X_scaled)
+
+tavsiye_sozlugu = {}
+genel_ort_uretim = cluster_df['Toplam_Uretim'].mean()
+genel_ort_sure = cluster_df['Ort_Cozum_Sn'].mean()
+for k in range(kmeans.n_clusters):
+    grup = cluster_df[cluster_df['Kume'] == k]
+    if grup.empty: continue
+    makineler_listesi = [str(int(m)) for m in grup['Makine']]
+    ort_u = grup['Toplam_Uretim'].mean()
+    ort_s = grup['Ort_Cozum_Sn'].mean()
+    
+    if ort_u >= genel_ort_uretim and ort_s <= genel_ort_sure:
+        etiket = "Optimum Grup"
+        tavsiye = "Üretim yüksek, müdahale hızlı. Standart korunmalıdır."
+    elif ort_u >= genel_ort_uretim and ort_s > genel_ort_sure:
+        etiket = "Hızlı ama Dikkatsizler"
+        tavsiye = "Üretim iyi ancak müdahale yavaş. Hız optimizasyonu yapılmalıdır."
+    elif ort_u < genel_ort_uretim and ort_s > genel_ort_sure:
+        etiket = "Ağır Vasıtalar"
+        tavsiye = "Üretim düşük ve müdahale uzun. Hız eğitimi verilmelidir."
+    else:
+        etiket = "Gelişime Açık Grup"
+        tavsiye = "Üretim düşük, müdahale ortalama. Duruş analizleri yapılmalıdır."
+        
+    anahtar = f"{etiket}|{tavsiye}"
+    if anahtar not in tavsiye_sozlugu:
+        tavsiye_sozlugu[anahtar] = []
+    tavsiye_sozlugu[anahtar].extend(makineler_listesi)
+
+kume_tavsiyeleri = []
+for anahtar, mak_list in tavsiye_sozlugu.items():
+    etiket, tavsiye = anahtar.split("|")
+    mak_list_sirali = sorted([int(m) for m in mak_list]) 
+    mak_str = ", ".join([get_machine_name(m) for m in mak_list_sirali]) 
+    kume_tavsiyeleri.append(f"{etiket} ({mak_str}): {tavsiye}")
+
+if makine_istatistikleri:
+    max_uretim_degeri = max(v['Toplam_Uretim'] for v in makine_istatistikleri.values())
+    min_uretim_degeri = min(v['Toplam_Uretim'] for v in makine_istatistikleri.values())
+
+    en_verimli_idler = [k for k, v in makine_istatistikleri.items() if v['Toplam_Uretim'] == max_uretim_degeri]
+    en_darbogaz_idler = [k for k, v in makine_istatistikleri.items() if v['Toplam_Uretim'] == min_uretim_degeri]
+
+    en_verimli_isimler = ", ".join([get_machine_name(m) for m in en_verimli_idler])
+    en_darbogaz_isimler = ", ".join([get_machine_name(m) for m in en_darbogaz_idler])
+
+    tum_makineler_uretim = "\n".join([f"{get_machine_name(k)}: {v['Toplam_Uretim']} adet" for k, v in makine_istatistikleri.items()])
+    toplam_gunluk_uretim = sum(v['Toplam_Uretim'] for v in makine_istatistikleri.values())
+else:
+    max_uretim_degeri = 0
+    min_uretim_degeri = 0
+    en_verimli_idler = []
+    en_darbogaz_idler = []
+    en_verimli_isimler = "Yok"
+    en_darbogaz_isimler = "Yok"
+    toplam_gunluk_uretim = 0
+
+toplam_tahmini_uretim = int(latest["pred_prod"].sum())
+en_yuksek_makine_idx = latest["pred_prod"].idxmax()
+toplam_tahmini_ariza = int(latest["pred_fault"].sum())
+en_riskli_makine_idx = latest["risk_score"].idxmax()
+en_riskli_makine_id = int(latest.loc[en_riskli_makine_idx, 'machine_id'])
+en_yuksek_risk = int(latest.loc[en_riskli_makine_idx, 'risk_score'])
+
+gelecek_tahmin_mesaji = (f"Yarın tahmini üretim miktarı {toplam_tahmini_uretim} adettir. En yüksek üretimi {get_machine_name(latest.loc[en_yuksek_makine_idx, 'machine_id'])} ({int(latest.loc[en_yuksek_makine_idx, 'pred_prod'])} adet) ile gerçekleştirecektir.\n"
+                         f"Yapay Zeka modellerimize göre yarın atölye genelinde toplam {toplam_tahmini_ariza} adet arıza beklenmektedir. "
+                         f"En yüksek arıza riski taşıyan makine %{en_yuksek_risk} risk skoru ile {get_machine_name(en_riskli_makine_id)}'dir.")
+
+shap_tr_sozluk = {
+    "production": "günün mevcut üretim hacmindeki aşırı zorlanma/dalgalanma",
+    "faults": "günlük toplam arıza sıklığındaki olağandışı değişim",
+    "prod_lag1": "bir önceki günün üretim performansındaki sapmalar",
+    "prod_lag2": "iki gün önceki üretim ritmindeki bozulmalar",
+    "fault_lag1": "dün giderilemeyen arızaların silsile etkisi",
+    "fault_lag2": "iki gün önceki arıza şokunun yansıması",
+    "prod_roll5": "son 5 günlük üretim ritminde süreğenleşen sapma trendi",
+    "fault_roll5": "son 5 gündeki ortalama arıza yoğunluğu seviyesi",
+    "prod_std5": "son 5 günlük üretim temposundaki yüksek volatilite",
+    "fault_std5": "son 5 gündeki arızaların dengesiz dağılımı",
+    "prod_trend": "üretim performansında yapısal bir değişim trendi",
+    "fault_trend": "arıza sıklığında değişim trendi",
+    "weekday": "haftanın gününe bağlı periyodik performans değişimi",
+    "prod_roll7": "son 7 günlük üretim ortalamasındaki uzun vadeli trend sapması",
+    "fault_roll7": "son 7 günlük arıza ortalamasının sınırları aşması",
+    "fault_accel": "arıza ivmesindeki tehlikeli değişim sinyali",
+    "prod_fault_ratio": "üretim/arıza dengesindeki bozulma",
+    "operator_bekleme_dk": "operatör kaynaklı boşta bekleme süreleri",
+    "ortalama_cevrim_sn": "makine çevrim sürelerindeki anormal uzama"
+}
+
+riskli_makine_nedenleri = top_causes.get(en_riskli_makine_id, [])
+turkce_nedenler = []
+
+for ozellik, yuzde, yon in riskli_makine_nedenleri:
+    cevrilmis_metin = shap_tr_sozluk.get(ozellik, ozellik)
+    turkce_nedenler.append(f"{cevrilmis_metin} ({yon}%{yuzde} ağırlık)")
+
+if turkce_nedenler:
+    gelecek_tahmin_mesaji += f"\n\nRisk algoritmasına (Çift Model SHAP) göre bu makinedeki tehlikeyi tetikleyen temel indikatörler: {', '.join(turkce_nedenler)}."
+    
+    makine_adi_str = get_machine_name(en_riskli_makine_id)
+    llm_muhendislik_hipotezi = shap_muhendislik_yorumu_uret(makine_adi_str, en_yuksek_risk, turkce_nedenler)
+    
+    if llm_muhendislik_hipotezi:
+         gelecek_tahmin_mesaji += f"\n\n💡 <b>AI MÜHENDİSLİK HİPOTEZİ:</b>\n{llm_muhendislik_hipotezi}"
+
+# ==========================================================
+# PYTHON-FIRST HİBRİT MİMARİ: RAPOR İSKELETİ OLUŞTUR
+# ==========================================================
+son_7_gun = hedef_tarih_dt - pd.Timedelta(days=7)
+uretim_son_7 = uretim_ham[(uretim_ham['start'].dt.date >= son_7_gun) & (uretim_ham['start'].dt.date <= hedef_tarih_dt)]
+yildiz_serisi = 1
+darbogaz_serisi = 1
+if not uretim_son_7.empty:
+    gunluk_verim = uretim_son_7.groupby([uretim_son_7['start'].dt.date, 'Makinekimlik'])['id'].count().reset_index(name='uretim')
+    tarihler = sorted(gunluk_verim['start'].unique(), reverse=True)
+    
+    for i in range(1, len(tarihler)):
+        gecmis_gun = gunluk_verim[gunluk_verim['start'] == tarihler[i]]
+        if gecmis_gun.empty: break
+        gecmis_en_iyi_id = gecmis_gun.loc[gecmis_gun['uretim'].idxmax(), 'Makinekimlik']
+        if str(gecmis_en_iyi_id) in [str(x) for x in en_verimli_idler]: yildiz_serisi += 1
+        else: break
+            
+    for i in range(1, len(tarihler)):
+        gecmis_gun = gunluk_verim[gunluk_verim['start'] == tarihler[i]]
+        if gecmis_gun.empty: break
+        gecmis_en_kotu_id = gecmis_gun.loc[gecmis_gun['uretim'].idxmin(), 'Makinekimlik']
+        if str(gecmis_en_kotu_id) in [str(x) for x in en_darbogaz_idler]: darbogaz_serisi += 1
+        else: break
+
+yildiz_seri_metni = f" (Son {yildiz_serisi} gündür zirvenin değişmeyen ismi!)" if yildiz_serisi > 1 else ""
+darbogaz_seri_metni = f" (Son {darbogaz_serisi} gündür olduğu gibi bugün de en kötü performans onda.)" if darbogaz_serisi > 1 else ""
+
+son_30_gun = hedef_tarih_dt - pd.Timedelta(days=30)
+uretim_son_30 = uretim_ham[(uretim_ham['start'].dt.date >= son_30_gun) & (uretim_ham['start'].dt.date < hedef_tarih_dt)]
+aylik_ort_metni = ""
+aylik_ort_gunluk_uretim = 0
+if not uretim_son_30.empty:
+    gunluk_toplamlar = uretim_son_30.groupby(uretim_son_30['start'].dt.date)['id'].count()
+    aylik_ort_gunluk_uretim = gunluk_toplamlar.mean()
+    if pd.notna(aylik_ort_gunluk_uretim) and aylik_ort_gunluk_uretim > 0:
+        aylik_ort_metni = f" (Aylık Atölye Ortalaması: {int(aylik_ort_gunluk_uretim)} adet/gün)"
+
+uretim_satirlari = []
+for k in sorted(makine_istatistikleri.keys()):
+    v = makine_istatistikleri[k]
+    uretim_satirlari.append(f"{get_machine_name(k)}: {v['Toplam_Uretim']} adet")
+uretim_listesi = ", ".join(uretim_satirlari)
+
+if len(en_verimli_idler) > 1:
+    zirve_metni = f"Günün en yüksek üretimini {max_uretim_degeri} adet ile {en_verimli_isimler} gerçekleştirerek Yıldız Makineler unvanını paylaşmışlardır.{yildiz_seri_metni}"
+else:
+    zirve_metni = f"Günün en yüksek üretimini {en_verimli_isimler} ({max_uretim_degeri} adet) gerçekleştirerek Yıldız Makine unvanını almıştır.{yildiz_seri_metni}"
+
+if len(en_darbogaz_idler) > 1:
+    dip_metni = f"Öte yandan {en_darbogaz_isimler} ({min_uretim_degeri} adet) ile darboğaz noktaları olarak dikkat çekmektedir.{darbogaz_seri_metni}"
+else:
+    dip_metni = f"Öte yandan {en_darbogaz_isimler} ({min_uretim_degeri} adet) ile darboğaz noktası olarak dikkat çekmektedir.{darbogaz_seri_metni}"
+
+bolum_1_1 = f"Atölye geneli toplam günlük üretim miktarı {toplam_gunluk_uretim} adettir{aylik_ort_metni}. {zirve_metni} {dip_metni}"
+
+en_yavas_mudahale_makine = None
+en_yavas_mudahale_sn = 0
+en_hizli_mudahale_makine = None
+en_hizli_mudahale_sn = 0
+if not gunluk_merged.empty:
+    gunluk_merged_copy = gunluk_merged.copy()
+    gunluk_merged_copy['beklenen_sure'] = gunluk_merged_copy['aciklama'].map(tarihi_alarm_sureleri)
+    
+    genel_ort = gunluk_merged_copy['gercek_cozum_sn'].mean()
+    gunluk_merged_copy['beklenen_sure'] = gunluk_merged_copy['beklenen_sure'].fillna(genel_ort)
+    
+    gunluk_merged_copy['performans_sapmasi_sn'] = gunluk_merged_copy['gercek_cozum_sn'] - gunluk_merged_copy['beklenen_sure']
+    ariza_cevap_ortalamalari = gunluk_merged_copy.groupby('Makinekimlik')['performans_sapmasi_sn'].mean()
+    
+    if not ariza_cevap_ortalamalari.empty:
+        en_yavas_mudahale_makine = ariza_cevap_ortalamalari.idxmax()
+        en_yavas_mudahale_sn = ariza_cevap_ortalamalari.max()
+        
+        gecerli_ortalamalar = ariza_cevap_ortalamalari[ariza_cevap_ortalamalari < 0]
+        if not gecerli_ortalamalar.empty:
+            en_hizli_mudahale_makine = gecerli_ortalamalar.idxmin()
+            en_hizli_mudahale_sn = gecerli_ortalamalar.min()
+
+anomali_metni = chr(10).join(yorgunluk_anomalileri) if yorgunluk_anomalileri else "Bu gün algoritmik yorgunluk anomalisi tespit edilmemiştir."
+yavaslik_metni = chr(10).join(operator_yavaslik_uyarilari) if operator_yavaslik_uyarilari else "Operatör müdahale sürelerinde belirgin bir yavaşlık tespit edilmemiştir."
+
+anomalili_makineler = set()
+tum_uyarilar = anomali_metni + yavaslik_metni
+for m_id in makine_istatistikleri.keys():
+    if get_machine_name(m_id) in tum_uyarilar:
+        anomalili_makineler.add(m_id)
+
+if en_yavas_mudahale_makine and en_yavas_mudahale_sn > 0:
+    anomalili_makineler.add(int(en_yavas_mudahale_makine))
+
+stabil_makineler = [m_id for m_id in makine_istatistikleri.keys() if m_id not in anomalili_makineler]
+stabil_metni = ""
+if stabil_makineler:
+    stabil_str = ", ".join([get_machine_name(m) for m in sorted(stabil_makineler)])
+    stabil_metni = f"\n[STABİL MAKİNELER]: {stabil_str} gün boyunca ciddi bir operasyonel gecikme yaşamadan sorunsuz çalışmıştır."
+bolum_1_2 = f"{anomali_metni}\n{yavaslik_metni}{stabil_metni}"
+
+ritim_satirlari = []
+for k in sorted(makine_istatistikleri.keys()):
+    v = makine_istatistikleri[k]
+    if v.get('Ritim_Mesaji'):
+        ritim_satirlari.append(str(v['Ritim_Mesaji']))
+ritim_metni = chr(10).join(ritim_satirlari) if ritim_satirlari else "Ritim analizi için yeterli veri bulunmamaktadır."
+
+if tum_ritim_verileri:
+    import json
+    json_str = json.dumps(tum_ritim_verileri)
+    ritim_metni += f"\n[RHYTHM_COMBINED|{json_str}]"
+
+bekleme_satirlari = []
+for k in sorted(makine_istatistikleri.keys()):
+    v = makine_istatistikleri[k]
+    if v.get('Bekleme_Mesaji'):
+        bekleme_satirlari.append(str(v['Bekleme_Mesaji']))
+bekleme_metni = chr(10).join(bekleme_satirlari) if bekleme_satirlari else "Bekleme analizi için yeterli veri bulunmamaktadır."
+
+kmeans_metni = chr(10).join(kume_tavsiyeleri) if kume_tavsiyeleri else "K-Means kümeleme analizi için yeterli veri yok."
+ariza_kat_str = ", ".join([f"{k}: {v} adet" for k, v in ariza_kategorileri.items() if v > 0])
+bolum_2_1 = f"Günün arıza dağılımı: {ariza_kat_str}."
+
+kronik_metni = chr(10).join(kronik_gecmis_mesajlari) if kronik_gecmis_mesajlari else "Kronik arıza tespit edilmemiştir."
+bakim_metni = chr(10).join(bakim_aksiyon_mesajlari) if bakim_aksiyon_mesajlari else "Ortak arıza grubu tespit edilmemiştir."
+
+# ==========================================================
+# GÖRSEL GRAFİK YOL OLUŞTURMA (Heatmap, Pareto vs.)
+# ==========================================================
+heatmap_chart_path = ""
+if not gunluk_ariza.empty:
+    try:
+        hm_data = gunluk_ariza.copy()
+        hm_data['saat'] = hm_data['ariza_zaman'].dt.hour
+        hm_pivot = hm_data.groupby(['Makinekimlik', 'saat']).size().unstack(fill_value=0)
+        mesai_saatleri = [s for s in range(7, 16) if s in hm_pivot.columns]
+        if mesai_saatleri:
+            hm_pivot = hm_pivot[mesai_saatleri]
+            makine_isimleri_hm = [get_machine_name(m) for m in hm_pivot.index]
+            saat_etiketleri = [f"{s:02d}:00" for s in mesai_saatleri]
+            fig, ax = plt.subplots(figsize=(10, 4))
+            im = ax.imshow(hm_pivot.values, cmap='RdYlGn_r', aspect='auto')
+            ax.set_xticks(range(len(saat_etiketleri)))
+            ax.set_xticklabels(saat_etiketleri, fontsize=9)
+            ax.set_yticks(range(len(makine_isimleri_hm)))
+            ax.set_yticklabels(makine_isimleri_hm, fontsize=9)
+            for ii in range(len(makine_isimleri_hm)):
+                for jj in range(len(saat_etiketleri)):
+                    val = hm_pivot.values[ii, jj]
+                    renk_t = 'white' if val > hm_pivot.values.mean() else 'black'
+                    ax.text(jj, ii, str(int(val)), ha='center', va='center', color=renk_t, fontsize=8, fontweight='bold')
+            ax.set_title('Arıza Isı Haritası (Makine × Saat)', fontweight='bold', fontsize=11)
+            ax.set_xlabel('Saat Dilimi')
+            plt.colorbar(im, ax=ax, label='Arıza Sayısı', shrink=0.8)
+            plt.tight_layout()
+            heatmap_chart_path = os.path.join(rapor_klasoru, "heatmap_chart.png")
+            plt.savefig(heatmap_chart_path, dpi=150, bbox_inches='tight')
+            plt.close()
+    except Exception: pass
+
+pareto_chart_path = ""
+pareto_metni = ""
+if not gunluk_ariza.empty:
+    try:
+        ariza_sayilari_p = gunluk_ariza['aciklama'].value_counts()
+        toplam_p = ariza_sayilari_p.sum()
+        kumulatif_p = ariza_sayilari_p.cumsum()
+        kumulatif_yuzde_p = kumulatif_p / toplam_p * 100
+        kritik_sayi_p = int((kumulatif_yuzde_p <= 80).sum()) + 1
+        kritik_sayi_p = min(kritik_sayi_p, len(ariza_sayilari_p))
+        pareto_metni = f"Pareto Analizi: Günün {len(ariza_sayilari_p)} farklı arıza türünden sadece {kritik_sayi_p} tanesi, tüm duruşların %80'ini oluşturmaktadır."
+        gosterilecek_p = min(max(15, kritik_sayi_p + 3), len(ariza_sayilari_p))
+        gosterilen_p = ariza_sayilari_p.head(gosterilecek_p)
+        gosterilen_kum_p = kumulatif_yuzde_p.head(gosterilecek_p)
+        fig, ax1 = plt.subplots(figsize=(12, 5))
+        renkler_p = ['#dc2626' if gosterilen_kum_p.iloc[idx_p] <= 80 else '#94a3b8' for idx_p in range(len(gosterilen_p))]
+        x_pos_p = range(len(gosterilen_p))
+        kisalt_p = [str(a)[:22] + '..' if len(str(a)) > 22 else str(a) for a in gosterilen_p.index]
+        ax1.bar(x_pos_p, gosterilen_p.values, color=renkler_p, edgecolor='white', linewidth=0.5)
+        ax1.set_ylabel('Arıza Sayısı', color='#334155', fontweight='bold')
+        ax1.set_xticks(x_pos_p)
+        ax1.set_xticklabels(kisalt_p, rotation=45, ha='right', fontsize=7)
+        ax2_p = ax1.twinx()
+        ax2_p.plot(x_pos_p, gosterilen_kum_p.values, color='#2563eb', marker='o', markersize=4, linewidth=2)
+        ax2_p.set_ylabel('Kümülatif %', color='#2563eb', fontweight='bold')
+        ax2_p.set_ylim(0, 105)
+        ax2_p.axhline(y=80, color='#dc2626', linestyle='--', linewidth=1.5, label='%80 Sınırı')
+        ax2_p.legend(loc='center right')
+        ax1.set_title(f'Pareto: İlk {kritik_sayi_p} Arıza Türü Toplam Duruşların %80\'ini Oluşturuyor', fontweight='bold', fontsize=10)
+        plt.tight_layout()
+        pareto_chart_path = os.path.join(rapor_klasoru, "pareto_chart.png")
+        plt.savefig(pareto_chart_path, dpi=150, bbox_inches='tight')
+        plt.close()
+    except Exception: pass
+
+operator_radar_path = ""
+try:
+    radar_op = {}
+    for mak_id_r in sorted(makine_istatistikleri.keys()):
+        st = makine_istatistikleri[mak_id_r]
+        e1 = min(100, int((st['Toplam_Uretim'] / max(1, st['Hedef_Uretim'])) * 100))
+        m_cv = gunluk_uretim[gunluk_uretim['Makinekimlik'] == mak_id_r]
+        if not m_cv.empty and m_cv['sure'].std() > 0:
+            cv_val = (m_cv['sure'].std() / max(1, m_cv['sure'].mean())) * 100
+            e2 = max(0, min(100, int(100 - cv_val)))
+        else: e2 = 50
+        
+        m_u_r = gunluk_uretim[gunluk_uretim['Makinekimlik'] == mak_id_r].sort_values('start')
+        m_a_r = gunluk_ariza[gunluk_ariza['Makinekimlik'] == mak_id_r].sort_values('ariza_zaman')
+        top_list = []
+        if not m_a_r.empty and not m_u_r.empty:
+            genel_s = m_u_r['sure'].mean()
+            for _, ar_row in m_a_r.iterrows():
+                snrk = m_u_r[m_u_r['start'] > ar_row['ariza_zaman']]
+                if len(snrk) >= 5: top_list.append(snrk.head(5)['sure'].mean() - genel_s)
+        e3 = max(0, min(100, int(100 - (np.mean(top_list) * 5)))) if top_list else 50
+        
+        e4 = 50
+        if not gunluk_merged.empty:
+            m_mg = gunluk_merged[gunluk_merged['Makinekimlik'] == mak_id_r].copy()
+            if not m_mg.empty:
+                m_mg['beklenen_r'] = m_mg['aciklama'].map(tarihi_alarm_sureleri).fillna(m_mg['gercek_cozum_sn'].mean())
+                sapma_r = (m_mg['gercek_cozum_sn'] - m_mg['beklenen_r']).mean()
+                e4 = max(0, min(100, int(100 - sapma_r)))
+                
+        e5 = max(0, min(100, int(100 - (st.get('Toplam_Bekleme_Dk', 0) * 2))))
+        radar_op[mak_id_r] = {'isim': get_machine_name(mak_id_r), 'skorlar': [e1, e2, e3, e4, e5]}
+        
+    if radar_op:
+        r_labels = ['Üretim\nHacmi', 'Tutarlılık', 'Toparlanma', 'Çeviklik', 'Disiplin']
+        r_angles = np.linspace(0, 2 * np.pi, len(r_labels), endpoint=False).tolist()
+        r_angles_c = r_angles + r_angles[:1]
+        fig_r, ax_r = plt.subplots(figsize=(10, 8), subplot_kw=dict(polar=True))
+        ax_r.spines['polar'].set_visible(False)
+        ax_r.grid(False)
+        ax_r.set_yticks([])
+        for lv in [20, 40, 60, 80, 100]:
+            ax_r.plot(r_angles_c, [lv]*len(r_angles_c), color='#e2e8f0', linestyle='--', linewidth=0.8, zorder=0)
+        for ag in r_angles:
+            ax_r.plot([ag, ag], [0, 100], color='#e2e8f0', linestyle='-', linewidth=0.8, zorder=0)
+            
+        r_palette = ['#2563eb', '#dc2626', '#16a34a', '#d97706', '#7c3aed', '#db2777', '#0891b2', '#000000']
+        sorted_ops = sorted(radar_op.items())
+        n_ops = len(sorted_ops)
+        for idx_r, (mk_r, vr) in enumerate(sorted_ops):
+            sk_c = vr['skorlar'] + vr['skorlar'][:1]
+            clr = r_palette[idx_r % len(r_palette)]
+            ax_r.plot(r_angles_c, sk_c, color=clr, linewidth=1.8, alpha=0.85, label=vr['isim'], 
+                      marker='o', markersize=5, markerfacecolor='white', markeredgewidth=1.8)
+            for ang, skor in zip(r_angles, vr['skorlar']):
+                txt_angle = ang + 0.05 * (idx_r - n_ops / 2)
+                txt_r = skor + 3 + (idx_r % 3) * 2
+                ax_r.text(txt_angle, txt_r, str(skor), fontsize=6.5, fontweight='bold', color=clr, ha='center', va='center')
+                
+        ax_r.set_ylim(0, 100)
+        ax_r.set_xticks(r_angles)
+        ax_r.set_xticklabels(r_labels, fontsize=10, fontweight='bold', color='#334155')
+        ax_r.legend(bbox_to_anchor=(1.1, 0.5), loc='center left', fontsize=10, title="Makineler / Operatörler", title_fontsize=11, frameon=True, edgecolor='#cbd5e1')
+        plt.figtext(0.02, 0.02, "* Not: Bekleme/duruş süresi olmayan makineler Disiplin kategorisinde 100 (Tam Puan) almıştır.", fontsize=8, color='gray')
+        plt.title('Operatör Performans Karşılaştırması (5 Eksen)', size=14, fontweight='bold', color='#0f172a', y=1.08)
+        plt.tight_layout()
+        operator_radar_path = os.path.join(rapor_klasoru, "operator_radar.png")
+        plt.savefig(operator_radar_path, dpi=150, bbox_inches='tight')
+        plt.close()
+except Exception: pass
+
+# ==========================================================
+# ÖZEL TARİHSEL ANOMALİ (VURGULAR) HESAPLAMA
+# ==========================================================
+anomali_vurgulari = []
+son_30_gun = hedef_tarih_dt - pd.Timedelta(days=30)
+son_7_gun = hedef_tarih_dt - pd.Timedelta(days=7)
+
+if pd.notna(aylik_ort_gunluk_uretim) and aylik_ort_gunluk_uretim > 100:
+    degisim = ((toplam_gunluk_uretim - aylik_ort_gunluk_uretim) / aylik_ort_gunluk_uretim) * 100
+    if degisim >= 15:
+        anomali_vurgulari.append(f"Atölye geneli bugünkü toplam üretim ({toplam_gunluk_uretim} adet), son 1 aylık günlük ortalamanın ({int(aylik_ort_gunluk_uretim)} adet) %{int(degisim)} ÜZERİNDEDİR. Tüm Atölyenin şaha kalktığı efsanevi bir gün!")
+    elif degisim <= -15:
+        anomali_vurgulari.append(f"Atölye geneli bugünkü toplam üretim ({toplam_gunluk_uretim} adet), son 1 aylık günlük ortalamanın ({int(aylik_ort_gunluk_uretim)} adet) %{abs(int(degisim))} ALTINDADIR. Atölye genelinde çok ciddi bir yavaşlama söz konusu.")
+
+ariza_son_30 = ariza_ham[(ariza_ham['date'] >= son_30_gun) & (ariza_ham['date'] < hedef_tarih_dt)]
+gunluk_toplam_ariza_bugun = len(gunluk_ariza)
+if not ariza_son_30.empty:
+    gunluk_ariza_toplamlar = ariza_son_30.groupby('date')['ariza_zaman'].count()
+    aylik_ort_gunluk_ariza = gunluk_ariza_toplamlar.mean()
+    if pd.notna(aylik_ort_gunluk_ariza) and aylik_ort_gunluk_ariza > 10:
+        ariza_degisim = ((gunluk_toplam_ariza_bugun - aylik_ort_gunluk_ariza) / aylik_ort_gunluk_ariza) * 100
+        if ariza_degisim <= -25:
+             anomali_vurgulari.append(f"Bugün Atölye genelinde toplam {gunluk_toplam_ariza_bugun} mekanik/elektronik arıza kaydedildi. Bu rakam, aylık arıza ortalamasının ({int(aylik_ort_gunluk_ariza)}) %{abs(int(ariza_degisim))} ALTINDADIR.")
+        elif ariza_degisim >= 25:
+             anomali_vurgulari.append(f"Bugün Atölye genelinde toplam {gunluk_toplam_ariza_bugun} arıza kaydedildi. Rakam, aylık ortalamanın ({int(aylik_ort_gunluk_ariza)}) %{int(ariza_degisim)} ÜZERİNDEDİR.")
+
+if not gunluk_ariza.empty:
+    bugun_ariza_gruplu = gunluk_ariza.groupby(['Makinekimlik', 'aciklama'])['ariza_zaman'].count().reset_index(name='sayi')
+    ekstrem_tekrar = bugun_ariza_gruplu[bugun_ariza_gruplu['sayi'] >= 10].sort_values('sayi', ascending=False)
+    if not ekstrem_tekrar.empty:
+        for _, row in ekstrem_tekrar.head(1).iterrows():
+            anomali_vurgulari.append(f"GÜNLÜK EKSTREM VAKA: {get_machine_name(int(row['Makinekimlik']))} gün içinde sadece '{row['aciklama']}' arızasından tam {int(row['sayi'])} kez peş peşe duruş yaşamıştır.")
+
+uretim_son_7 = uretim_ham[(uretim_ham['start'].dt.date >= son_7_gun) & (uretim_ham['start'].dt.date < hedef_tarih_dt)]
+if not uretim_son_7.empty:
+    haftalik_ort = uretim_son_7.groupby(['Makinekimlik', uretim_son_7['start'].dt.date])['id'].count().groupby('Makinekimlik').mean()
+    for makine_id, stat in makine_istatistikleri.items():
+        if makine_id in haftalik_ort.index:
+            ort_uretim = haftalik_ort[makine_id]
+            bugun_uretim = stat['Toplam_Uretim']
+            if ort_uretim > 50:
+                degisim_yuzdesi = ((bugun_uretim - ort_uretim) / ort_uretim) * 100
+                if degisim_yuzdesi <= -25:
+                    anomali_vurgulari.append(f"{get_machine_name(makine_id)}'nin bugünkü üretimi ({bugun_uretim} adet), son 1 haftalık ortalamasının ({int(ort_uretim)} adet) %{abs(int(degisim_yuzdesi))} ALTINDADIR.")
+                elif degisim_yuzdesi >= 30:
+                    anomali_vurgulari.append(f"{get_machine_name(makine_id)}'nin bugünkü üretimi ({bugun_uretim} adet), son 1 haftalık ortalamasının ({int(ort_uretim)} adet) %{int(degisim_yuzdesi)} ÜZERİNDEDİR.")
+
+ariza_son_7 = ariza_ham[(ariza_ham['date'] >= son_7_gun) & (ariza_ham['date'] < hedef_tarih_dt)]
+if not ariza_son_7.empty and not gunluk_ariza.empty:
+    kronik_liste = ariza_son_7.groupby(['Makinekimlik', 'aciklama'])['ariza_zaman'].count().reset_index(name='sayi')
+    bugun_ariza_sayisi = gunluk_ariza.groupby(['Makinekimlik', 'aciklama'])['ariza_zaman'].count().reset_index(name='bugun_sayi')
+    kapanmayan_yaralar = pd.merge(kronik_liste, bugun_ariza_sayisi, on=['Makinekimlik', 'aciklama'])
+    kapanmayan_yaralar = kapanmayan_yaralar[(kapanmayan_yaralar['sayi'] >= 10) & (kapanmayan_yaralar['bugun_sayi'] >= 5)]
+    if not kapanmayan_yaralar.empty:
+        en_kotu_yara = kapanmayan_yaralar.sort_values('bugun_sayi', ascending=False).iloc[0]
+        anomali_vurgulari.append(f"{get_machine_name(int(en_kotu_yara['Makinekimlik']))}'te '{en_kotu_yara['aciklama']}' arızası son 1 haftada {int(en_kotu_yara['sayi'])} kez yaşanmışken, SADECE BUGÜN {int(en_kotu_yara['bugun_sayi'])} kez daha tekrar etmiştir.")
+
+secilen_anomaliler = anomali_vurgulari[:3]
+vurgu_metni = ""
+if secilen_anomaliler:
+    vurgular_str = "\n- ".join([""] + secilen_anomaliler)
+    vurgu_metni = f"\n\n🚨 AYLIK/HAFTALIK EKSTREM GELİŞMELER:{vurgular_str}"
+
+python_rapor_taslagi = f"""ÜRETİM MÜDÜRÜ İÇİN GÜNLÜK VERİMLİLİK VE İŞ GELİŞTİRME RAPORU ({tahmin_tarihi})
+1. Günlük Üretim Özeti
+{bolum_1_1}
+2. Operasyonel Kayıplar ve Duruş Analizi
+{bolum_1_2}
+3. Saat Başı Üretim Ritmi Analizi
+{ritim_metni}
+4. Operatör ve Makine Bekleme Analizi
+{bekleme_metni}
+5. Üretim Yöneticisine Aksiyon ve İş Geliştirme Önerileri
+{kmeans_metni}
+[OPERATOR_RADAR|{operator_radar_path if operator_radar_path else ''}]
+BÖLÜM 2: BAKIM MÜHENDİSİ İÇİN GÜNLÜK ARIZA VE TEKNİK ANALİZ RAPORU ({tahmin_tarihi})
+1. Günlük Teknik Hata Özeti ve Kategorizasyonu
+{bolum_2_1}
+[HEATMAP_CHART|{heatmap_chart_path if heatmap_chart_path else ''}]
+{pareto_metni}
+[PARETO_CHART|{pareto_chart_path if pareto_chart_path else ''}]
+2. Kök Neden Analizi (Mekanik ve Ayar Sorunları)
+{kronik_metni}
+BÖLÜM 3: GELECEK ÜRETİM TAHMİNİ VE KAPANIŞ
+{gelecek_tahmin_mesaji}
+"""
+
+if aylik_ort_gunluk_uretim > 0:
+    if toplam_gunluk_uretim < aylik_ort_gunluk_uretim * 0.95:
+        aylik_kiyas_metni = "aylık ortalamamızın altındadır"
+        gidisat_metni = "Bu açıdan bakıldığında, üretimdeki yavaşlamalar konusunda dikkat çekmektedir."
+    elif toplam_gunluk_uretim > aylik_ort_gunluk_uretim * 1.05:
+        aylik_kiyas_metni = "aylık ortalamamızın belirgin şekilde üzerindedir"
+        gidisat_metni = "Bu açıdan bakıldığında, atölyemizde olağanüstü ve sevindirici bir ivmelenme görülmektedir."
+    else:
+        aylik_kiyas_metni = "aylık ortalamamız seviyelerindedir"
+        gidisat_metni = "Üretimde stabil yapı korunmaya devam edilmektedir."
+else:
+    aylik_kiyas_metni = "mevcut verilere paralellik göstermektedir"
+    gidisat_metni = ""
+
+if len(en_verimli_idler) > 1:
+    yildiz_cumle = f"Üretim sahnesinin liderleri olarak performans gösteren {en_verimli_isimler}, bugün {max_uretim_degeri} adet üretimi ile zirveyi paylaşmışlardır."
+    if yildiz_serisi > 1: yildiz_cumle += f" (Bu zirve performansı son {yildiz_serisi} gündür korunmaktadır.)"
+else:
+    yildiz_cumle = f"Üretim sahnesinin lideri olarak performans gösteren {en_verimli_isimler}, bugün {max_uretim_degeri} adet üretimi ile zirvede yer alıyor."
+    if yildiz_serisi > 1: yildiz_cumle += f" Zirvedeki yerini son {yildiz_serisi} gündür korumuştur."
+
+if len(en_darbogaz_idler) > 1:
+    darbogaz_cumle = f"Aynı zamanda {en_darbogaz_isimler} makineleri de darboğaz noktasında yer alıyor ve bugünkü üretim adetleri {min_uretim_degeri}'dir."
+    if darbogaz_serisi > 1: darbogaz_cumle += f" (Son {darbogaz_serisi} gündür bu darboğaz trendi devam etmektedir.)"
+else:
+    darbogaz_cumle = f"Aynı zamanda {en_darbogaz_isimler} de darboğaz noktasında yer alıyor ve bugünkü üretim adedi {min_uretim_degeri}'dir."
+    if darbogaz_serisi > 1: darbogaz_cumle += f" Son {darbogaz_serisi} gündür aynı şekilde performans göstermektedir."
+
+en_carpici_ariza_metni = ""
+kronik_uyari_maddesi = ""
+gunun_en_buyuk_arizasi = ""
+if not gunluk_ariza.empty:
+    bugun_ariza_gruplu = gunluk_ariza.groupby(['Makinekimlik', 'aciklama'])['ariza_zaman'].count().reset_index(name='sayi')
+    if not bugun_ariza_gruplu.empty:
+        en_kotu = bugun_ariza_gruplu.sort_values('sayi', ascending=False).iloc[0]
+        makine_no = int(en_kotu['Makinekimlik'])
+        ariza_adi = en_kotu['aciklama']
+        ariza_sayisi = int(en_kotu['sayi'])
+        gunun_en_buyuk_arizasi = ariza_adi
+        
+        ardisik_gun_sayisi = 1
+        for i in range(1, 6):
+            gecmis_gun = hedef_tarih_dt - pd.Timedelta(days=i)
+            gecmis_ariza = ariza_ham[ariza_ham['date'] == gecmis_gun]
+            if not gecmis_ariza.empty:
+                gecmis_gruplu = gecmis_ariza.groupby(['Makinekimlik', 'aciklama'])['ariza_zaman'].count().reset_index(name='sayi')
+                if not gecmis_gruplu.empty:
+                    gecmis_en_kotu = gecmis_gruplu.sort_values('sayi', ascending=False).iloc[0]
+                    if str(gecmis_en_kotu['Makinekimlik']) == str(makine_no) and gecmis_en_kotu['aciklama'] == ariza_adi:
+                        ardisik_gun_sayisi += 1
+                        continue
+            break
+        
+        dun_ayni_kriz_mi = (ardisik_gun_sayisi > 1)
+        
+        if dun_ayni_kriz_mi:
+            ek_vurgu = f"Üstelik bu durum son {ardisik_gun_sayisi} gündür GÜNÜN EN FAZLA YAŞANAN arızası olmasına rağmen bugün yine hatanın zirvede olması, müdahalelerin tamamen yetersiz kaldığını göstermektedir."
+            ariza_up = str(ariza_adi).upper()
+            if any(x in ariza_up for x in ["İP", "KOPMA"]): ornek_nedenler = "kılavuzlarda statiklenme, tansiyon ayarı vb."
+            elif any(x in ariza_up for x in ["TAKILMA", "KESİLME"]): ornek_nedenler = "kablaj, titreşim vb."
+            elif any(x in ariza_up for x in ["SENSÖR", "OKUMA", "GÖRME"]): ornek_nedenler = "lens kirliliği, odak kayması vb."
+            elif any(x in ariza_up for x in ["VALF", "BASINÇ", "PNÖMATİK"]): ornek_nedenler = "hava kaçağı, valf içi sıkışma vb."
+            else: ornek_nedenler = "mekanik yorulma vb."
+            kronik_uyari_maddesi = f"• KRONİK SORUN UYARISI: {get_machine_name(makine_no)}'da yaşanan '{ariza_adi}' arızası, son {ardisik_gun_sayisi} gündür üst üste atölyenin en çok yaşanan arızası olmuştur! Kök neden analizi ({ornek_nedenler}) için detaylı inceleme başlatılmalıdır.\n"
+        else:
+            ek_vurgu = "Bu arızanın frekansının bugün içerisinde bu kadar yüksek olması acil bakım müdahalesi gerektirdiğini göstermektedir."
+            kronik_uyari_maddesi = ""
+            
+        en_carpici_ariza_metni = f" Bugünkü arızalar incelendiğinde en çarpıcı durum {get_machine_name(makine_no)}'de yaşanan {ariza_sayisi} defa '{ariza_adi}' durumudur. {ek_vurgu}"
+
+import random
+if makine_istatistikleri:
+    en_uzun_bekleyen_id = max(makine_istatistikleri, key=lambda x: makine_istatistikleri[x].get('Toplam_Bekleme_Dk', 0))
+    en_uzun_bekleme_dk = makine_istatistikleri[en_uzun_bekleyen_id].get('Toplam_Bekleme_Dk', 0)
+else:
+    en_uzun_bekleyen_id = "Bilinmiyor"
+    en_uzun_bekleme_dk = 0
+
+gecmis_bekleme_metni = ""
+gecmis_mudahale_metni = ""
+dun = hedef_tarih_dt - pd.Timedelta(days=1)
+son_7_gun = hedef_tarih_dt - pd.Timedelta(days=7)
+
+if en_uzun_bekleme_dk > 0 and en_uzun_bekleyen_id != "Bilinmiyor":
+    gecmis_df = df[(df['date'].dt.date >= son_7_gun) & (df['date'].dt.date < hedef_tarih_dt)]
+    if not gecmis_df.empty:
+        gunluk_en_kotuler = gecmis_df.loc[gecmis_df.groupby('date')['operator_bekleme_dk'].idxmax()]
+        bu_makinenin_vukuatlari = gunluk_en_kotuler[gunluk_en_kotuler['machine_id'] == str(en_uzun_bekleyen_id)]
+        tekrar_sayisi = len(bu_makinenin_vukuatlari)
+        dun_yasandi_mi = dun in bu_makinenin_vukuatlari['date'].dt.date.values
+        if tekrar_sayisi > 0:
+            ek_dun = " Üstelik bu tablo DÜN de yaşanmıştır." if dun_yasandi_mi else ""
+            gecmis_bekleme_metni = f" ({get_machine_name(en_uzun_bekleyen_id)}, son bir hafta içerisinde {tekrar_sayisi} defa daha günün en çok bekleyen makinesi olmuştur.{ek_dun})"
+
+if en_yavas_mudahale_makine:
+    gecmis_uretim = uretim_ham_copy[(uretim_ham_copy['start'].dt.date >= son_7_gun) & (uretim_ham_copy['start'].dt.date < hedef_tarih_dt)].copy()
+    if not gecmis_uretim.empty:
+        gecmis_uretim['sadece_tarih'] = gecmis_uretim['start'].dt.date
+        gunluk_mudahale = gecmis_uretim.groupby(['sadece_tarih', 'Makinekimlik'])['gercek_cozum_sn'].mean().reset_index()
+        gunluk_mudahale.columns = ['date', 'Makinekimlik', 'ort_cozum_sn']
+        idx = gunluk_mudahale.groupby('date')['ort_cozum_sn'].idxmax()
+        gunluk_en_yavaslar = gunluk_mudahale.loc[idx.dropna()]
+        bu_makinenin_yavasliklari = gunluk_en_yavaslar[gunluk_en_yavaslar['Makinekimlik'] == str(en_yavas_mudahale_makine)]
+        tekrar_sayisi_mudahale = len(bu_makinenin_yavasliklari)
+        dun_yasandi_mi_mudahale = dun in bu_makinenin_yavasliklari['date'].values
+        if tekrar_sayisi_mudahale > 0:
+            ek_dun_m = " Özellikle DÜN de aynı yavaşlık tespit edilmiştir." if dun_yasandi_mi_mudahale else ""
+            gecmis_mudahale_metni = f" ({get_machine_name(en_yavas_mudahale_makine)}, son bir haftada {tekrar_sayisi_mudahale} gün daha en yavaş müdahale edilen makine olmuştur.{ek_dun_m})"
+
+operasyonel_uyari_metni = ""
+parca_1, parca_2, parca_3 = "", "", ""
+if en_uzun_bekleme_dk > 0 and en_uzun_bekleyen_id != "Bilinmiyor":
+    parca_1 = f"Günün en uzun operatör bekleme süresi {en_uzun_bekleme_dk} dakika ile {get_machine_name(en_uzun_bekleyen_id)}'de kaydedilmiştir{gecmis_bekleme_metni}."
+if en_yavas_mudahale_makine and en_yavas_mudahale_sn > 0:
+    parca_2 = f"Alarmlara müdahale eforunda ise atölyenin en yavaş reaksiyon gösteren birimi, kendi karşılaştığı arızaların standart çözüm süresini ortalama {int(en_yavas_mudahale_sn)} saniye aşan {get_machine_name(int(en_yavas_mudahale_makine))} olmuştur{gecmis_mudahale_metni}."
+if en_hizli_mudahale_makine and en_hizli_mudahale_sn < 0:
+    parca_3 = f"Bunun tam aksine, karşılaştığı arızaları tarihsel standartlarından ortalama {abs(int(en_hizli_mudahale_sn))} saniye daha hızlı çözerek üstün efor sergileyen {get_machine_name(int(en_hizli_mudahale_makine))} operatörü 'Günün En Pratik Operatörü' unvanını kazanmıştır."
+
+if parca_1 or parca_2 or parca_3:
+    birlesik = " | ".join([p for p in [parca_1, parca_2, parca_3] if p])
+    operasyonel_uyari_metni = f" Operasyonel performansa baktığımızda; {birlesik}"
+
+mesai_ihlal_kesin_metin = ""
+if mesai_ihlali_uyarilari:
+    mesai_ihlal_kesin_metin = f"\n        MESAİ VE DİSİPLİN İHLALLERİ\n        Bugün atölye genelinde tespit edilen mesai ihlalleri şunlardır: {', '.join(mesai_ihlali_uyarilari)}. Bu durum üretimde planlanmamış kapasite kaybına yol açmıştır.\n"
+
+dun_tarih_pd = pd.to_datetime(tahmin_tarihi) - pd.Timedelta(days=1)
+df_dun = df[df["date"] == dun_tarih_pd].copy()
+beklenen_vs_gercek_mesaji = ""
+if not df_dun.empty:
+    X_dun = df_dun[features]
+    df_dun["pred_today_faults"] = np.maximum(0, reg_model.predict(X_dun))
+    toplam_beklenen_bugun = int(df_dun["pred_today_faults"].sum())
+    toplam_gercek_bugun = len(gunluk_ariza)
+    
+    ekstrem_artis_mesajlari = []
+    for i, row in df_dun.iterrows():
+        mak_id = row['machine_id']
+        beklenen_toplam = row['pred_today_faults']
+        gercek_bugun_m = gunluk_ariza[gunluk_ariza['Makinekimlik'] == mak_id]
+        gercek_toplam = len(gercek_bugun_m)
+        
+        if gercek_toplam >= beklenen_toplam + 5:
+            m_gecmis = ariza_ham[(ariza_ham['Makinekimlik'] == mak_id) & (ariza_ham['date'] < dun_tarih_pd.date()) & (ariza_ham['date'] >= (dun_tarih_pd.date() - pd.Timedelta(days=30)))]
+            frekanslar = m_gecmis['aciklama'].value_counts(normalize=True) if not m_gecmis.empty else pd.Series(dtype=float)
+            gercek_turler = gercek_bugun_m['aciklama'].value_counts()
+            
+            for ariza_adi, gercek_adet in gercek_turler.items():
+                oran = frekanslar.get(ariza_adi, 0.0)
+                beklenen_adet = int(round(beklenen_toplam * oran))
+                if gercek_adet >= beklenen_adet + 5:
+                    fark = gercek_adet - beklenen_adet
+                    ekstrem_artis_mesajlari.append(f"{get_machine_name(mak_id)}'de '{ariza_adi}' arızasının beklenen arıza sayısının {fark} defa üzerinde tekrarlanması anormaldir.")
+    
+    if ekstrem_artis_mesajlari:
+        beklenen_vs_gercek_mesaji = f" <font color=\"red\"><b>Bugün beklenen arıza sayısının üzerindeyiz. " + " ".join(ekstrem_artis_mesajlari) + "</b></font>"
+    elif toplam_gercek_bugun < toplam_beklenen_bugun:
+        beklenen_vs_gercek_mesaji = f" Bugün beklenen arıza sıklığının ({toplam_beklenen_bugun} adet) altında kalarak toplam {toplam_gercek_bugun} arıza ile stabil bir performans sergiledik."
+    elif toplam_gercek_bugun > toplam_beklenen_bugun:
+        beklenen_vs_gercek_mesaji = f" Bugün arıza sayımız ({toplam_gercek_bugun} adet), model beklentisinin ({toplam_beklenen_bugun} adet) bir miktar üzerine çıkmıştır."
+    else:
+        beklenen_vs_gercek_mesaji = f" Bugün arıza sayımız ({toplam_gercek_bugun} adet) tam olarak yapay zeka modelimizin beklentisi ile eşleşmiştir."
+
+yonetici_ozeti = (
+    f"[BLOK 1 - ÜRETİM VE KIYASLAMA]: Bugünkü üretim verilerimize göre, Atölye genelinde toplam günlük üretimin {toplam_gunluk_uretim} adetten oluşması {aylik_kiyas_metni} "
+    f"(Aylık Atölye Ortalaması: {int(aylik_ort_gunluk_uretim) if aylik_ort_gunluk_uretim else 0} adet/gün). {gidisat_metni}\n"
+    f"[BLOK 2 - YILDIZ VE DARBOĞAZ]: {yildiz_cumle} {darbogaz_cumle}\n"
+    f"[BLOK 3 - ARIZA ANALİZİ]: {en_carpici_ariza_metni} {beklenen_vs_gercek_mesaji}\n"
+    f"[BLOK 4 - OPERASYONEL PERFORMANS]: {operasyonel_uyari_metni}"
+)
+
+def lokasyon_cikar(ariza_metni):
+    match = re.search(r'\b(SAĞ|SOL|ÜST|ALT|BÖLGE|HAT|NO)\b\s*([A-Z0-9]+)?\s*([0-9]+)?', str(ariza_metni).upper())
+    if match: return match.group(0).strip()
+    return "İlgili bölge"
+
+COZUM_HAVUZU = {
+    "İP_KOPMASI": {
+        "Gunluk": ["{lokasyon} iplik yolundaki hav birikimi temizlenmeli.", "{lokasyon} iplik gerginlik ayarı gözden geçirilmeli."],
+        "Haftalik": ["{lokasyon} ünitesinin yay mekanizması bakıma alınmalıdır."]
+    },
+    "SENSÖR": {
+        "Gunluk": ["{lokasyon} sensörünün lens yüzeyi kuru bezle silinmelidir.", "{lokasyon} sensörü üzerinden hızlı yeniden öğretme (Auto-Tune) yapılmalıdır."],
+        "Haftalik": ["{lokasyon} sensörünün montaj braketi sıkılmalıdır."]
+    },
+    "VALF_PNÖMATİK": {
+        "Gunluk": ["{lokasyon} valf adasında hava kaçağı dinlenmelidir.", "{lokasyon} piston strokunu engelleyen sıkışma kontrol edilmelidir."],
+        "Haftalik": ["{lokasyon} şartlandırıcılar kontrol edilmeli, su birikimi tahliye edilmelidir."]
+    },
+    "MOTOR_SÜRÜCÜ": {
+        "Gunluk": ["{lokasyon} sürücüsü hata kodu not edilmeli.", "{lokasyon} motor zorlanması manuel kontrol edilmelidir."],
+        "Haftalik": ["{lokasyon} motor izolasyon testi yapılmalıdır."]
+    },
+    "MEKANİK": {
+        "Gunluk": ["{lokasyon} bölgesinde sürtünme sesi dinlenmelidir.", "{lokasyon} hareketli parçalar yağlanmalıdır."],
+        "Haftalik": ["{lokasyon} aktarma organlarında boşluk kontrolü yapılmalıdır."]
+    },
+    "GENEL": {
+        "Gunluk": ["{lokasyon} bölgesinde amir saha gözlemi yapmalıdır."],
+        "Haftalik": ["{lokasyon} için Kök Neden (5-Neden) analizi başlatılmalıdır."]
+    }
+}
+
+def analyze_with_llm(yonetici_bilgisi, aksiyon_notlari, kronik_madde="", en_buyuk_ariza="", ardisik_gun_sayisi=1, dun_yasandi_mi=None, mesai_metni="", is_weekly=False, is_monthly=False):
+    if dun_yasandi_mi is True: ardisik_gun_sayisi = 5
+    elif dun_yasandi_mi is False: ardisik_gun_sayisi = 1
+        
+    ariza_metni = str(en_buyuk_ariza).upper()
+    tespit_edilen_lokasyon = lokasyon_cikar(ariza_metni)
+    
+    kat = "GENEL"
+    if any(x in ariza_metni for x in ["SENSÖR", "OKUMA"]): kat = "SENSÖR"
+    elif any(x in ariza_metni for x in ["VALF", "BASINÇ", "PNÖMATİK"]): kat = "VALF_PNÖMATİK"
+    elif any(x in ariza_metni for x in ["MOTOR", "SÜRÜCÜ", "TERMİK"]): kat = "MOTOR_SÜRÜCÜ"
+    elif any(x in ariza_metni for x in ["İP", "KOPMA"]): kat = "İP_KOPMASI"
+    elif any(x in ariza_metni for x in ["MEKANİK", "RULMAN"]): kat = "MEKANİK"
+    
+    secenekler = COZUM_HAVUZU.get(kat, COZUM_HAVUZU["GENEL"])["Gunluk"]
+    
+    if ardisik_gun_sayisi >= 4:
+        secilen_metodoloji = f"Lütfen bu kronikleşmiş arızaya uygun olarak önceki günlerde vermiş olduğumuz tavsiyeleri uyguladığınıza emin olun."
+    else:
+        idx = min(ardisik_gun_sayisi - 1, len(secenekler) - 1)
+        secilen_metodoloji = secenekler[idx].format(lokasyon=tespit_edilen_lokasyon)
+
+    if is_weekly:
+        cikti_sablonu = "HAFTALIK STRATEJİK ÖZET\n[Haftalık Toplam Üretim]... vs." # Kısaltıldı
+    elif is_monthly:
+        cikti_sablonu = "AYLIK STRATEJİK ÖZET\n[Toplam Üretim]... vs." # Kısaltıldı
+    else:
+        cikti_sablonu = """
+        GÜNLÜK YÖNETİCİ ÖZETİ
+        Bugünkü üretim verileri, Atölye genelinde günlük üretimin [Toplam Üretim] adetten oluşması [Aylık kıyaslama durumu]. Bu durum, atölyemizde [Gidişat yorumu] görmemizi sağlıyor. Aylık ortalama değerimiz olan [Aylık Ortalama] adet/gün'ün [altında/üzerinde/seviyesinde] üretim gerçekleştiriyoruz.
+
+        YILDIZ VE DARBOĞAZ MAKİNELER
+        Üretim sahnesinin lideri / liderleri olarak performans gösteren [Yıldız Makine / Makineleri], bugün [Yıldız Üretim Adedi] adet üretimi ile zirvede yer almaya devam ediyor. Aynı zamanda, [Darboğaz Makine / Makineleri] de darboğaz noktasında yer alıyor ve bugünkü üretim adedi [Darboğaz Üretim Adedi]'tir.
+
+        ARIZA ANALİZİ
+        Bugünkü arızalar incelendiğinde en çarpıcı durum, [En Çok Arıza Yapan Makine]'deki '[En Çarpıcı Arıza Adı]' arızasıdır. Bu arıza bugün içerisinde [Arıza Sayısı] defa gerçekleşmiş ve [Aciliyet durumu / Düne göre kıyaslaması].
+
+        OPERASYONEL PERFORMANS
+        Operasyonel performansa baktığımızda; [En uzun operatör bekleme süresi ve makinesi]. Alarmlara müdahale eforunda ise atölyemizin en yavaş reaksiyon gösteren birimi, kendi karşılaştığı arızaların standart çözüm süresini ortalama [Yavaşlama Saniyesi] saniye aşan [En Yavaş Makine] olmuştur. Ancak, karşılaştığı arızaları tarihsel standartlarından ortalama [Hızlanma Saniyesi] saniye daha hızlı çözerek üstün efor sergileyen [En Hızlı Makine] operatörü 'Günün En Pratik Operatörü' unvanını kazanmıştır.
+        """
+        
+    try:
+        prompt = f"""
+        Sen kıdemli bir Endüstriyel Bakım ve Üretim Yöneticisisin. 
+        Aşağıdaki GİRDİ VERİLERİ'ni kullanarak BİREBİR aşağıdaki ÇIKTI ŞABLONU formatında bir rapor oluştur.
+        
+        GİRDİ VERİLERİ: {yonetici_bilgisi}
+        
+        ÇIKTI ŞABLONU:
+        {cikti_sablonu}
+        {mesai_metni}
+        DİNAMİK TAVSİYE
+        {kronik_madde}
+        • {secilen_metodoloji}
+        """
+        payload = {"model": "llama3.1", "prompt": prompt, "stream": False, "options": {"temperature": 0.2}}
+        response = requests.post("http://localhost:11434/api/generate", json=payload, timeout=300)
+        
+        if response.status_code == 200:
+            return response.json().get('response', yonetici_bilgisi).strip()
+        else:
+            return yonetici_bilgisi
+    except Exception:
+        return yonetici_bilgisi
+
+try:
+    final_yonetici_ozeti = analyze_with_llm(yonetici_ozeti, kmeans_metni + "\n" + bakim_metni, kronik_madde=kronik_uyari_maddesi, en_buyuk_ariza=gunun_en_buyuk_arizasi, ardisik_gun_sayisi=ardisik_gun_sayisi, mesai_metni=mesai_ihlal_kesin_metin)
+except NameError:
+    final_yonetici_ozeti = analyze_with_llm(yonetici_ozeti, kmeans_metni + "\n" + bakim_metni, kronik_madde="", en_buyuk_ariza="", ardisik_gun_sayisi=1)
+
+# ----------------------------------------------------------
+# PDF BİRLEŞTİRME VE KAYIT İŞLEMİ
+# ----------------------------------------------------------
+rapor_klasoru = "Raporlar"
+if not os.path.exists(rapor_klasoru):
+    os.makedirs(rapor_klasoru)
+pdf_adi = os.path.join(rapor_klasoru, f"Uretim_ve_Bakim_Raporu_{tahmin_tarihi}.pdf")
+
+try:
+    temiz_yonetici_ozeti = final_yonetici_ozeti.replace('GÜNÜN YÖNETİCİ ÖZETİ:', '').replace('GÜNÜN YÖNETİCİ ÖZETİ', '').strip()
+    final_rapor = f"--- GÜNÜN YÖNETİCİ ÖZETİ ---\n{temiz_yonetici_ozeti}\n\n{'-'*60}\n\n{python_rapor_taslagi.strip()}"
+    
+    pdf_yolu = create_pdf_report(final_rapor, pdf_adi)
+    
+    print("\n" + "="*50)
+    print("--- 100% Native Python Rapor Üretimi Tamamlandı ---")
+    print(yonetici_ozeti)
+    print("="*50)
+    print(f"✅ Rapor başarıyla {pdf_yolu} olarak oluşturuldu!")
+    
+    # --- JENERİK MAİL LİSTESİ ---
+    alici_listesi = ["admin@yourcompany.com", "manager1@yourcompany.com", "production@yourcompany.com"]
+    
+    send_email_via_exchange_smtp(pdf_file_path=pdf_adi, recipient_email=alici_listesi, en_verimli_isimler=en_verimli_isimler, en_darbogaz_isimler=en_darbogaz_isimler, tahmin_tarihi=tahmin_tarihi)
+except Exception as e:
+    print(f"\n❌ Kritik Hata: {str(e)}")
+
+joblib.dump(clf_model, "fault_probability.pkl")
+
+# ==========================================================
+# 18.5 DİNAMİK STRATEJİK TAVSİYE MOTORU (ESKALASYON)
+# ==========================================================
+def dinamik_stratejik_tavsiye_uret(ariza_serisi, ariza_ham, hedef_tarih_dt, periyot="Haftalik"):
+    if ariza_serisi.empty: return "- Kayda değer bir arıza örüntüsü tespit edilmemiştir."
+        
+    tavsiyeler = []
+    bugun = pd.to_datetime(hedef_tarih_dt)
+    gecmis_dosyasi = os.path.join(os.path.dirname(__file__), "tavsiye_gecmisi.json")
+    try:
+        with open(gecmis_dosyasi, "r", encoding="utf-8") as f: gecmis = json.load(f)
+    except: gecmis = {}
+        
+    for ariza, sayi in ariza_serisi.items():
+        ariza_up = str(ariza).upper()
+        
+        gecmis_1_hafta_bas = bugun - pd.Timedelta(days=14)
+        gecmis_1_hafta_bit = bugun - pd.Timedelta(days=7)
+        gecmis_h1_sayi = len(ariza_ham[(ariza_ham['aciklama'] == ariza) & (ariza_ham['date'] >= gecmis_1_hafta_bas.date()) & (ariza_ham['date'] < gecmis_1_hafta_bit.date())])
+        
+        vurgu_metni = ""
+        periyot_anahtari = "Gunluk"
+        if gecmis_h1_sayi >= 15:
+            periyot_anahtari = "Haftalik"
+            vurgu_metni = "(DİKKAT: Kronik Sorun!) "
+            
+        kat = "GENEL"
+        if any(x in ariza_up for x in ["SENSÖR", "OKUMA"]): kat = "SENSÖR"
+        elif any(x in ariza_up for x in ["VALF", "BASINÇ"]): kat = "VALF_PNÖMATİK"
+        
+        tespit_edilen_lokasyon = lokasyon_cikar(ariza_up)
+        secenekler = COZUM_HAVUZU.get(kat, COZUM_HAVUZU["GENEL"]).get(periyot_anahtari, COZUM_HAVUZU["GENEL"]["Gunluk"])
+        secilen_cozum = random.choice(secenekler) 
+        
+        nokta_atisi_cozum = secilen_cozum.format(lokasyon=tespit_edilen_lokasyon)
+        aksiyon = f"{vurgu_metni}Raporlanan **'{ariza}'** arızası için: {nokta_atisi_cozum}"
+        if periyot == "Aylik":
+            aksiyon = aksiyon.replace("edilmelidir", "edilmesi için bütçe ayrılmalıdır")
+        tavsiyeler.append(f"- {aksiyon}")
+        
+    with open(gecmis_dosyasi, "w", encoding="utf-8") as f:
+        json.dump(gecmis, f, ensure_ascii=False, indent=4)
+    return "\n".join(tavsiyeler)
+
+# ==========================================================
+# 19. HAFTALIK VE AYLIK RAPORLAMA YÖNETİCİSİ (ROUTER)
+# ==========================================================
+print("\n[BİLGİ] AI Periyodik Raporlama Yöneticisi Kontrol Ediliyor...")
+bugun_weekday = pd.to_datetime(tahmin_tarihi).weekday() 
+is_weekly = (bugun_weekday == 4) 
+is_monthly = False  
+
+def send_extra_reports(pdf_paths, subject, body_html):
+    print(f"[BİLGİ] '{subject}' e-postası On-Premise Exchange üzerinden gönderiliyor...")
+    EXCHANGE_SERVER_IP = "smtp.yourcompany.local"
+    EXCHANGE_PORT = 25
+    SENDER_EMAIL = "ai-system@yourcompany.com"
+    alici_listesi = ["admin@yourcompany.com", "manager1@yourcompany.com", "production@yourcompany.com"]
+    
+    msg = MIMEMultipart()
+    msg['From'] = SENDER_EMAIL
+    msg['To'] = ", ".join(alici_listesi)
+    msg['Subject'] = subject
+    msg.attach(MIMEText(body_html, 'html'))
+    
+    for p in pdf_paths:
+        if os.path.exists(p):
+            with open(p, "rb") as f:
+                pdf_attachment = MIMEApplication(f.read(), _subtype="pdf")
+                pdf_attachment.add_header('Content-Disposition', 'attachment', filename=os.path.basename(p))
+                msg.attach(pdf_attachment)
+    try:
+        with smtplib.SMTP(EXCHANGE_SERVER_IP, EXCHANGE_PORT) as server:
+            server.send_message(msg)
+        print("✅ Özel Periyodik Rapor başarıyla gönderildi!")
+    except Exception as e:
+        print(f"❌ Mail gönderilemedi: {str(e)}")
+
+if is_weekly:
+    print("\n[BİLGİ] Haftalık Rapor Hazırlanıyor...")
+    # (Haftalık raporlama fonksiyon blokları güvenlik ve temizlik için sadeleştirilmiş formda çalışacaktır.)
+    pass
+
+if is_monthly:
+    print("\n[BİLGİ] Aylık Rapor Hazırlanıyor...")
+    # (Aylık raporlama fonksiyon blokları çalışacaktır.)
+    pass
